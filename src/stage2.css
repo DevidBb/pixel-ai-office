@@ -91,6 +91,8 @@
 .mini-status.error { color: #bd5555; opacity: 1; }
 .subtask-objective { margin: 0; padding: 0 13px 12px 30px; font-size: .82rem; line-height: 1.5; opacity: .78; }
 .agent-result { margin: 0 12px 12px; padding: 12px; border-radius: 8px; background: rgba(132, 142, 130, .08); }
+.agent-result .result-stats { font-weight: 400; opacity: .7; }
+.agent-result .result-warning { margin: 6px 0 0; font-size: .75rem; color: #9a5b2c; }
 .agent-result pre, .final-result pre {
   margin: 8px 0 0;
   white-space: pre-wrap;

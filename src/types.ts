@@ -21,6 +21,19 @@ export type OfficeLog = {
   kind?: 'info' | 'success' | 'warning';
 };
 
+export type ModelStats = {
+  promptTokens?: number;
+  outputTokens?: number;
+  promptMs?: number;
+  genMs?: number;
+  loadMs?: number;
+  queueMs?: number;
+  totalMs?: number;
+  tokPerSec?: number;
+  maxTokens?: number;
+  doneReason?: string;
+};
+
 export type OfficeSubtask = {
   id: string;
   agentId: string;
@@ -28,6 +41,9 @@ export type OfficeSubtask = {
   objective: string;
   status: SubtaskStatus;
   result?: string;
+  stats?: ModelStats;
+  /** Имена других сотрудников, упомянутые в ответе этого агента. */
+  foreign?: string[];
 };
 
 export type OfficeTask = {

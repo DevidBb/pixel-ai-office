@@ -11,7 +11,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "start:api": "node server.mjs",
-    "check": "node --check server.mjs"
+    "check": "node --check server.mjs && node --check server/config.mjs && node --check server/llm.mjs && node --check server/office.mjs && node --check server/app.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "bench:model": "node scripts/bench-model.mjs"
   },
   "dependencies": {
     "phaser": "^3.90.0",
