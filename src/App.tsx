@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import Phaser from 'phaser';
 import { OfficeScene } from './OfficeScene';
-import type { Agent, OfficeLog, OfficeSubtask, OfficeTask, TaskStatus } from './types';
+import type { Agent, ModelStats, OfficeLog, OfficeSubtask, OfficeTask, TaskStatus } from './types';
 import './stage2.css';
 
 const initialAgents: Agent[] = [
@@ -34,7 +34,20 @@ type ApiEvent = {
   title?: string;
   result?: string;
   kind?: OfficeLog['kind'];
+  stats?: ModelStats;
+  foreign?: string[];
 };
+
+function formatStats(stats?: ModelStats) {
+  if (!stats) return '';
+  const parts: string[] = [];
+  if (stats.totalMs) parts.push(`${Math.round(stats.totalMs / 1000)} с`);
+  if (stats.outputTokens) parts.push(`${stats.outputTokens}${stats.maxTokens ? `/${stats.maxTokens}` : ''} ток.`);
+  if (stats.tokPerSec) parts.push(`${stats.tokPerSec} ток/с`);
+  if (stats.queueMs && stats.queueMs >= 1000) parts.push(`в очереди ${Math.round(stats.queueMs / 1000)} с`);
+  if (stats.doneReason === 'length') parts.push('обрезано лимитом');
+  return parts.join(' · ');
+}
 
 function loadSavedTasks(): OfficeTask[] {
   try {
@@ -144,8 +157,11 @@ export default function App() {
       return;
     }
     if (event.type === 'plan') {
+      const assigned = new Set((event.subtasks || []).map(subtask => subtask.agentId));
       updateTask(taskId, task => ({ ...task, status: 'working', planSummary: event.summary || '', subtasks: event.subtasks || [] }));
-      updateAgent('ceo', agent => ({ ...agent, status: 'working', task: 'Координирует команду' }));
+      setAgents(current => current.map(agent => agent.id === 'ceo'
+        ? { ...agent, status: 'working', task: 'Координирует команду' }
+        : assigned.has(agent.id) ? agent : { ...agent, status: 'idle', task: 'Не назначен в этой задаче' }));
       return;
     }
     if (event.type === 'agent-start' && event.agentId && event.subtaskId) {
@@ -161,7 +177,7 @@ export default function App() {
       updateTask(taskId, task => ({
         ...task,
         subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId
-          ? { ...subtask, status: 'done', result: event.result || 'Агент вернул пустой результат.' }
+          ? { ...subtask, status: 'done', result: event.result || 'Агент вернул пустой результат.', stats: event.stats, foreign: event.foreign }
           : subtask)
       }));
       return;
@@ -313,7 +329,7 @@ export default function App() {
 
       <section className="workspace">
         <div className="section-heading">
-          <div><p className="eyebrow">ЦЕЛИ → ПЛАН → РАБОТА КОМАНДЫ → ПРОВЕРКА</p><h1>Офис агентов</h1><p className="subheading">CEO распределяет работу. Специалисты выполняют подзадачи, используют результаты коллег и возвращают итоговый отчёт.</p></div>
+          <div><p className="eyebrow">ЦЕЛИ → ПЛАН → РАБОТА КОМАНДЫ → ПРОВЕРКА</p><h1>Офис агентов</h1><p className="subheading">CEO сразу раздаёт задания. Каждый специалист выполняет только своё, CEO сводит настоящие результаты в итоговый отчёт.</p></div>
           <div className="date-chip">⌁ {new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
         </div>
 
@@ -345,7 +361,7 @@ export default function App() {
                   <span className={`status-tag ${agent.status}`}><i />{agentStatusLabel[agent.status]}</span>
                 </button>)}
               </div>
-              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, распределяет подзадачи, собирает результаты и проверяет итог.' : 'Получает отдельную подзадачу от CEO и использует результаты, переданные предыдущими специалистами.'}</p></div>
+              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, распределяет подзадачи, собирает результаты и проверяет итог.' : 'Получает от CEO отдельное задание и пишет только свою часть. Результаты коллег ему не передаются.'}</p></div>
             </section>
 
             <section className="panel task-panel">
@@ -354,7 +370,7 @@ export default function App() {
                 <div className="ceo-route"><span className="ceo-route-icon">C</span><span><strong>CEO · Luma 1</strong><small>Сам назначит специалистов и приоритеты</small></span></div>
                 <label htmlFor="task-prompt">КАКОЙ РЕЗУЛЬТАТ НУЖЕН?</label>
                 <textarea id="task-prompt" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Например: проверь спрос на услугу для малого бизнеса в Эстонии, подготовь предложение и план привлечения первого клиента…" rows={5} maxLength={5000} />
-                <div className="prompt-meta"><span>CEO составит план и выполнит задачи по очереди</span><span>{prompt.length}/5000</span></div>
+                <div className="prompt-meta"><span>Можно адресовать задания: «Luma 4 — слоган»</span><span>{prompt.length}/5000</span></div>
                 <button className="dispatch-button" type="submit" disabled={!prompt.trim() || isRunning || apiConfigured === false}><span>{isRunning ? 'Команда выполняет задачу…' : 'Передать цель CEO'}</span><span>↗</span></button>
                 {isRunning && <button className="stop-button" type="button" onClick={stopTask}>Остановить выполнение</button>}
                 <p className="prototype-note"><span>ⓘ</span> Используются реальные вызовы модели через локальный API-сервер. Поиск в интернете, рассылка сообщений и оплата не выполняются автоматически.</p>
@@ -377,9 +393,13 @@ export default function App() {
                   {(task.subtasks || []).length > 0 && <div className="subtask-list"><h3>Назначенные подзадачи</h3>{task.subtasks!.map(subtask => {
                     const agent = agents.find(item => item.id === subtask.agentId);
                     return <details className="subtask-card" key={subtask.id} open={subtask.status === 'working' || subtask.status === 'error'}>
-                      <summary><span className={`subtask-indicator ${subtask.status}`} /><span className="subtask-heading"><strong>{agent?.role || subtask.agentId}</strong><small>{subtask.title}</small></span><span className={`mini-status ${subtask.status}`}>{subtask.status === 'queued' ? 'В очереди' : subtask.status === 'working' ? 'Работает' : subtask.status === 'done' ? 'Готово' : 'Ошибка'}</span></summary>
+                      <summary><span className={`subtask-indicator ${subtask.status}`} /><span className="subtask-heading"><strong>{agent ? `${agent.name} · ${agent.role}` : subtask.agentId}</strong><small>{subtask.title}</small></span><span className={`mini-status ${subtask.status}`}>{subtask.status === 'queued' ? 'В очереди' : subtask.status === 'working' ? 'Работает' : subtask.status === 'done' ? 'Готово' : 'Ошибка'}</span></summary>
                       <p className="subtask-objective">{subtask.objective}</p>
-                      {subtask.result && <div className="agent-result"><strong>Результат сотрудника</strong><pre>{subtask.result}</pre></div>}
+                      {subtask.result && <div className="agent-result">
+                        <strong>Результат {agent?.name || subtask.agentId}{subtask.stats ? <small className="result-stats"> · {formatStats(subtask.stats)}</small> : null}</strong>
+                        {(subtask.foreign || []).length > 0 && <p className="result-warning">⚠ В ответе упомянуты {subtask.foreign!.join(', ')}. Это текст {agent?.name}, а не их результаты.</p>}
+                        <pre>{subtask.result}</pre>
+                      </div>}
                     </details>;
                   })}</div>}
                   {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
