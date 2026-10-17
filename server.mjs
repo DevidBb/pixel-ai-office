@@ -18,5 +18,8 @@ server.on('error', error => {
 server.listen(config.port, '127.0.0.1', () => {
   console.log(`Pixel AI Office API: http://127.0.0.1:${config.port}`);
   console.log(`Model: ${config.model}; provider: ${config.provider}; API key: ${config.apiKey ? 'configured' : 'not configured'}`);
-  console.log(`LLM: concurrency=${config.concurrency}, timeout=${config.timeoutMs} ms, agentMaxTokens=${config.agentMaxTokens}, agentShortMaxTokens=${config.agentShortMaxTokens}, router=${config.routerMode}${config.provider === 'ollama' ? `, think=${config.ollamaThink}, num_ctx=${config.ollamaNumCtx}` : ''}`);
+  console.log(`LLM: concurrency=${config.concurrency}, timeout=${config.timeoutMs} ms, agentMaxTokens=${config.agentMaxTokens}, agentShortMaxTokens=${config.agentShortMaxTokens}, router=${config.routerMode}, ceoSummary=${config.ceoSummary}${config.provider === 'ollama' ? `, think=${config.ollamaThink}, num_ctx=${config.ollamaNumCtx}` : ''}`);
+  if (config.ceoSummary === true) {
+    console.log('Внимание: CEO_SUMMARY=true — сводка CEO моделью запускается всегда, даже для адресных заданий (на CPU это +1–3 мин). Чтобы итог собирался из ответов сотрудников, укажи в .env CEO_SUMMARY=auto или удали эту строку.');
+  }
 });

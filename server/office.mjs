@@ -29,7 +29,14 @@ const ALL_TEAM_PATTERNS = [
 ];
 
 // Упоминание сотрудника по имени («Luma 4», «Люма 4») или по роли с разделителем («Креатор — слоган»).
-const NAME_MENTION = /(?<![\p{L}\d])(?:luma|люма)\s*[-#№]?\s*([1-6])(?!\d)/giu;
+const NAME = String.raw`(?:luma|люма)\s*[#№]?\s*`;
+const NAME_MENTION = new RegExp(String.raw`(?<![\p{L}\d])(?:luma|люма)\s*[-#№]?\s*([1-6])(?!\d)`, 'giu');
+// Диапазон: «Luma 2–6», «Luma 2…6», «Luma 2 — Luma 6», «с Luma 2 по Luma 6».
+// Тире с пробелами без второго имени («Luma 2 — 3 группы») — это поручение, а не диапазон.
+const RANGE_MENTION = new RegExp(
+  String.raw`(?<![\p{L}\d])(?:с\s+)?${NAME}([1-6])(?:(?:[-–—]|\.{2,3}|…)(?:${NAME})?([1-6])|\s*(?:[-–—]|\.{2,3}|…|по|до)\s*${NAME}([1-6]))(?!\d)`,
+  'giu'
+);
 const ROLE_MENTIONS = [
   ['research', /(?<!\p{L})(?:исследовател\p{L}*(?:\s+рынка)?|аналитик\p{L}*\s+рынка)\s*(?=[:—–-])/giu],
   ['product', /(?<!\p{L})продуктолог\p{L}*\s*(?=[:—–-])/giu],
@@ -37,19 +44,50 @@ const ROLE_MENTIONS = [
   ['sales', /(?<!\p{L})(?:менеджер\p{L}*\s+(?:по\s+)?продаж\p{L}*|продажник\p{L}*)\s*(?=[:—–-])/giu],
   ['finance', /(?<!\p{L})(?:финансов\p{L}*\s+аналитик\p{L}*|финансист\p{L}*)\s*(?=[:—–-])/giu]
 ];
+// Отрицание перед упоминанием в том же фрагменте («не подключай Luma 2», «кроме Luma 6», «без Luma 5»)
+// или сразу после него («Luma 2 не нужен»).
+const NEGATION_BEFORE = /(?<!\p{L})(?:не|без|кроме|исключая|за\s+исключением)(?!\p{L})[^,;.:!?\n]*$/iu;
+const NEGATION_AFTER = /^\s*[-—–:,]?\s*(?:не\s+(?:нуж\p{L}*|надо|участву\p{L}*|подключа\p{L}*|привлека\p{L}*|трога\p{L}*|работа\p{L}*)|пусть\s+отдыха\p{L}*|отдыха\p{L}*|пропуска\p{L}*)(?!\p{L})/iu;
+// «не подключай Luma 2 и Luma 3» — отрицание действует на перечисление через «и»/«или»;
+// через запятую — только если у следующего сотрудника нет своего поручения («Luma 3, Luma 4 — слоган»).
+const LIST_AND = /^\s*,?\s*(?:и|или)\s*$/iu;
+const LIST_COMMA = /^\s*,\s*$/u;
 // Конец адресного поручения: «;», перевод строки или точка в конце предложения.
 const CLAUSE_END = /;|\r?\n|\.(?=\s+\p{Lu}|\s*$)/u;
 const SHORT_MARKERS = /(?<!\p{L})(?:коротко|кратко|краткий|короткий|в двух словах|одн\p{L}*\s+предложени\p{L}*)/iu;
+// «один слоган», «одно название», «одну идею» — нужен ровно один вариант.
+const ONE_ITEM = /(?<!\p{L})(?:один|одну|одно|одним)\s+(?:слоган|вариант|назван|предложени|фраз|абзац|строк|совет|пример|иде|пост|заголов)\p{L}*/iu;
+
+function agentIdsInRange(from, to) {
+  const ids = [];
+  for (let n = Number(from); n <= Number(to); n++) {
+    const agent = agentByNumber(n);
+    if (agent && agent.id !== CEO.id) ids.push(agent.id);
+  }
+  return ids;
+}
 
 function findMentions(goal) {
   const mentions = [];
+  const covered = [];
+  for (const match of goal.matchAll(RANGE_MENTION)) {
+    const from = match[1];
+    const to = match[2] ?? match[3];
+    if (Number(to) <= Number(from)) continue;
+    const end = match.index + match[0].length;
+    mentions.push({ agentIds: agentIdsInRange(from, to), start: match.index, end, range: `Luma ${from}–${to}` });
+    covered.push([match.index, end]);
+  }
+  const isCovered = index => covered.some(([start, end]) => index >= start && index < end);
   for (const match of goal.matchAll(NAME_MENTION)) {
+    if (isCovered(match.index)) continue;
     const agent = agentByNumber(match[1]);
-    mentions.push({ agentId: agent.id, start: match.index, end: match.index + match[0].length });
+    mentions.push({ agentIds: [agent.id], start: match.index, end: match.index + match[0].length });
   }
   for (const [agentId, pattern] of ROLE_MENTIONS) {
     for (const match of goal.matchAll(pattern)) {
-      mentions.push({ agentId, start: match.index, end: match.index + match[0].length });
+      if (isCovered(match.index)) continue;
+      mentions.push({ agentIds: [agentId], start: match.index, end: match.index + match[0].length });
     }
   }
   return mentions.sort((a, b) => a.start - b.start);
@@ -61,24 +99,37 @@ function cleanClause(text) {
 
 /**
  * Находит адресные поручения пользователя: «Luma 2 — 3 группы клиентов; Luma 3 — 3 напитка».
- * Возвращает задания по сотрудникам и общий контекст без чужих поручений.
- * «Luma 2 и Luma 4 — слоган» даёт одно задание обоим.
+ * Возвращает задания по сотрудникам, исключённых сотрудников и общий контекст без чужих поручений.
+ * «Luma 2 и Luma 4 — слоган» и «Luma 2–6 — слоган» дают одно задание всем названным.
+ * «Не подключай Luma 2», «кроме Luma 6» исключают сотрудника, даже если просили всю команду.
  */
 export function parseAssignments(goal) {
   const mentions = findMentions(goal);
   const assignments = new Map();
+  const excluded = new Set();
   const spans = [];
   let pending = [];
+  let previousNegated = false;
   for (let i = 0; i < mentions.length; i++) {
     const mention = mentions[i];
+    const prefix = goal.slice(mentions[i - 1]?.end ?? 0, mention.start);
     const nextStart = mentions[i + 1]?.start ?? goal.length;
     const tail = goal.slice(mention.end, nextStart);
     const stop = tail.search(CLAUSE_END);
     const raw = stop >= 0 ? tail.slice(0, stop) : tail;
     spans.push([mention.start, mention.end + raw.length]);
-    if (mention.agentId === CEO.id) continue;
+    const ids = mention.agentIds.filter(id => id !== CEO.id);
     const clause = cleanClause(raw);
-    pending.push(mention.agentId);
+    const listed = previousNegated && (LIST_AND.test(prefix) || (LIST_COMMA.test(prefix) && !clause));
+    const negated = NEGATION_BEFORE.test(prefix) || NEGATION_AFTER.test(tail) || listed;
+    previousNegated = negated;
+    if (negated) {
+      ids.forEach(id => excluded.add(id));
+      pending = [];
+      continue;
+    }
+    if (!ids.length) continue;
+    pending.push(...ids);
     if (!clause || /^(?:и|или|а также|,)$/iu.test(clause)) continue;
     for (const agentId of pending) {
       const previous = assignments.get(agentId);
@@ -87,6 +138,7 @@ export function parseAssignments(goal) {
     pending = [];
   }
   for (const agentId of pending) if (!assignments.has(agentId)) assignments.set(agentId, '');
+  for (const agentId of excluded) assignments.delete(agentId);
 
   let context = '';
   let cursor = 0;
@@ -98,7 +150,7 @@ export function parseAssignments(goal) {
   context = context
     .replace(/\s*[:;,](?:[\s;,]*[;,])*\s*(?=\.|$)/g, '')
     .replace(/(?:\s*[;,]\s*){2,}/g, '; ').replace(/\s+([.;,])/g, '$1').replace(/\s{2,}/g, ' ').trim();
-  return { assignments: Object.fromEntries(assignments), context };
+  return { assignments: Object.fromEntries(assignments), excluded: [...excluded], context };
 }
 
 export function wantsWholeTeam(goal) {
@@ -106,7 +158,16 @@ export function wantsWholeTeam(goal) {
 }
 
 export function isShortRequest(goal) {
-  return SHORT_MARKERS.test(goal);
+  return SHORT_MARKERS.test(goal) || ONE_ITEM.test(goal);
+}
+
+export function asksForOne(goal) {
+  return ONE_ITEM.test(goal);
+}
+
+/** Сотрудники, которых пользователь явно исключил («не подключай Luma 2», «кроме Luma 6»). */
+export function excludedAgents(goal) {
+  return parseAssignments(goal).excluded;
 }
 
 function scoreAgents(goal) {
@@ -120,25 +181,27 @@ function scoreAgents(goal) {
 }
 
 const names = ids => ids.map(id => agentById(id).name).join(', ');
+const withExclusions = (reason, excluded) => excluded.length ? `${reason}; по просьбе пользователя не подключены: ${names(excluded)}` : reason;
 
 /**
- * Явные указания пользователя («всеми пятью», «Luma 2 — ...») главнее подсчёта ключевых слов.
- * Возвращает null, если явных указаний нет.
+ * Явные указания пользователя («всеми пятью», «Luma 2 — ...», «кроме Luma 6») главнее подсчёта ключевых слов.
+ * Возвращает null, если явных назначений нет.
  */
 export function routeByExplicit(goal, maxAgents = 5) {
-  const { assignments, context } = parseAssignments(goal);
+  const { assignments, excluded, context } = parseAssignments(goal);
+  const allowed = AGENTS.map(a => a.id).filter(id => !excluded.includes(id));
   const named = Object.keys(assignments).filter(id => agentById(id));
-  if (wantsWholeTeam(goal)) {
+  if (wantsWholeTeam(goal) && allowed.length) {
     return {
-      agentIds: AGENTS.map(a => a.id).slice(0, maxAgents),
-      assignments, context,
+      agentIds: allowed.slice(0, maxAgents),
+      assignments, excluded, context,
       source: 'explicit',
-      reason: named.length ? `пользователь явно попросил всю команду и указал задания для ${names(named)}` : 'пользователь явно попросил всю команду'
+      reason: withExclusions(named.length ? `пользователь явно попросил всю команду и указал задания для ${names(named)}` : 'пользователь явно попросил всю команду', excluded)
     };
   }
   if (named.length) {
-    const agentIds = AGENTS.map(a => a.id).filter(id => named.includes(id)).slice(0, maxAgents);
-    return { agentIds, assignments, context, source: 'explicit', reason: `пользователь явно назначил: ${names(agentIds)}` };
+    const agentIds = allowed.filter(id => named.includes(id)).slice(0, maxAgents);
+    return { agentIds, assignments, excluded, context, source: 'explicit', reason: withExclusions(`пользователь явно назначил: ${names(agentIds)}`, excluded) };
   }
   return null;
 }
@@ -147,16 +210,23 @@ export function routeByExplicit(goal, maxAgents = 5) {
 export function routeByRules(goal, maxAgents = 5) {
   const explicit = routeByExplicit(goal, maxAgents);
   if (explicit) return explicit;
+  const excluded = excludedAgents(goal);
   const { scores, complex } = scoreAgents(goal);
-  if (complex) return { agentIds: AGENTS.map(a => a.id).slice(0, maxAgents), source: 'keywords', reason: 'комплексная задача — подключена команда' };
-  const matched = scores.filter(s => s.score > 0 && s.score === scores[0].score).map(s => s.id).slice(0, maxAgents);
-  if (matched.length === 1) return { agentIds: matched, source: 'keywords', reason: 'простая задача — один профильный специалист' };
-  if (matched.length) return { agentIds: matched, source: 'keywords', reason: 'задача затрагивает несколько профилей' };
+  const allowed = scores.filter(s => !excluded.includes(s.id));
+  if (!allowed.length) return null;
+  if (complex) return { agentIds: AGENTS.map(a => a.id).filter(id => !excluded.includes(id)).slice(0, maxAgents), excluded, source: 'keywords', reason: withExclusions('комплексная задача — подключена команда', excluded) };
+  const matched = allowed.filter(s => s.score > 0 && s.score === allowed[0].score).map(s => s.id).slice(0, maxAgents);
+  if (matched.length === 1) return { agentIds: matched, excluded, source: 'keywords', reason: withExclusions('простая задача — один профильный специалист', excluded) };
+  if (matched.length) return { agentIds: matched, excluded, source: 'keywords', reason: withExclusions('задача затрагивает несколько профилей', excluded) };
   return null;
 }
 
 export function fallbackRoute(goal, maxAgents = 5) {
-  return routeByRules(goal, maxAgents) || { agentIds: ['product'], source: 'fallback', reason: 'профиль не определён — задача передана продуктологу' };
+  const quick = routeByRules(goal, maxAgents);
+  if (quick) return quick;
+  const excluded = excludedAgents(goal);
+  const agentId = ['product', ...AGENTS.map(a => a.id)].find(id => !excluded.includes(id)) || 'product';
+  return { agentIds: [agentId], excluded, source: 'fallback', reason: withExclusions(`профиль не определён — задача передана: ${agentById(agentId).role}`, excluded) };
 }
 
 export function routerMessages(goal) {
@@ -193,7 +263,8 @@ export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxToke
         objective,
         context: assignment ? context : goal,
         assigned: Boolean(assignment),
-        maxTokens: short ? Math.min(agentShortMaxTokens, agentMaxTokens) : agentMaxTokens
+        exactlyOne: asksForOne(objective),
+        maxTokens: short || isShortRequest(objective) ? Math.min(agentShortMaxTokens, agentMaxTokens) : agentMaxTokens
       };
     })
   };
@@ -214,9 +285,10 @@ export function agentMessages(agent, task, plan) {
   const system = `Ты ${agent.name}, ${agent.role} в Pixel AI Office. ${agent.focus} Отвечай на русском, конкретно и честно. Не выдумывай ссылки, клиентов, контакты и продажи. Пиши только свой результат: не упоминай других сотрудников и не пиши за них.`;
   const shared = plan.tasks.length > 1 ? ' Другие части цели делают коллеги — пиши только по своей роли.' : '';
   const context = task.assigned ? contextForAgent(task.context) : '';
+  const one = task.exactlyOne ? ' Нужен ровно один вариант — дай один, без списка альтернатив.' : '';
   const user = task.assigned
-    ? `${context ? `КОНТЕКСТ:\n${context}\n\n` : ''}ТВОЁ ЗАДАНИЕ:\n${task.objective}\n\nДай только готовый результат по этому заданию, коротко. Допущения помечай словом «допущение».`
-    : `ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n${task.context}\n\nТВОЯ ЗАДАЧА:\n${task.objective}${shared}\n\nДай готовый практический результат (не план намерений). Будь кратким: заголовки и короткие списки. Допущения помечай словом «допущение».`;
+    ? `${context ? `КОНТЕКСТ:\n${context}\n\n` : ''}ТВОЁ ЗАДАНИЕ:\n${task.objective}\n\nДай только готовый результат по этому заданию, коротко.${one} Допущения помечай словом «допущение».`
+    : `ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n${task.context}\n\nТВОЯ ЗАДАЧА:\n${task.objective}${shared}\n\nДай готовый практический результат (не план намерений). Будь кратким: заголовки и короткие списки.${one} Допущения помечай словом «допущение».`;
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, parseAssignments, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { routeByRules, fallbackRoute, parseAssignments, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -53,12 +53,86 @@ test('кофейня: просьба «коротко» уменьшает ли�
   for (const task of plan.tasks) assert.equal(task.maxTokens, 220);
 });
 
-test('один слоган: назначается только Luma 4', () => {
+test('один слоган: только Luma 4, короткий лимит и просьба дать ровно один вариант', () => {
   const route = routeByRules(SLOGAN_GOAL);
   assert.deepEqual(route.agentIds, ['creator']);
-  const plan = buildPlan(SLOGAN_GOAL, route, { agentMaxTokens: 700 });
+  const plan = buildPlan(SLOGAN_GOAL, route, { agentMaxTokens: 700, agentShortMaxTokens: 220 });
   assert.equal(plan.tasks[0].objective, SLOGAN_GOAL);
+  assert.equal(plan.tasks[0].maxTokens, 220);
+  assert.equal(plan.tasks[0].exactlyOne, true);
+  const [, user] = agentMessages(AGENTS.find(a => a.id === 'creator'), plan.tasks[0], plan);
+  assert.match(user.content, /ровно один вариант/);
+});
+
+test('«один/одно/одну …» включает короткий лимит, обычная задача — нет', () => {
+  for (const goal of ['Дай одно название для кофейни', 'Предложи одну идею для акции', 'Напиши один пост про кофейню']) {
+    const plan = buildPlan(goal, fallbackRoute(goal), { agentMaxTokens: 700, agentShortMaxTokens: 220 });
+    assert.equal(plan.tasks[0].maxTokens, 220, goal);
+    assert.equal(plan.tasks[0].exactlyOne, true, goal);
+  }
+  const plan = buildPlan('Напиши пост про кофейню', routeByRules('Напиши пост про кофейню'), { agentMaxTokens: 700, agentShortMaxTokens: 220 });
   assert.equal(plan.tasks[0].maxTokens, 700);
+  assert.equal(plan.tasks[0].exactlyOne, false);
+  const coffee = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
+  assert.ok(coffee.tasks.every(t => !t.exactlyOne));
+});
+
+test('диапазон «Luma 2–6» назначает Luma 2…6 одним заданием', () => {
+  for (const goal of ['Luma 2–6, проанализируйте кофейню', 'Luma 2-6 — проанализируйте кофейню', 'Luma 2…6: проанализируйте кофейню', 'С Luma 2 по Luma 6 — проанализируйте кофейню', 'Luma 2 — Luma 6: проанализируйте кофейню']) {
+    const route = routeByRules(goal);
+    assert.deepEqual(route.agentIds, ALL, goal);
+    assert.ok(Object.values(route.assignments).every(a => a === 'проанализируйте кофейню'), goal);
+  }
+});
+
+test('диапазон-подмножество «Luma 3-5» и обратный диапазон', () => {
+  assert.deepEqual(routeByRules('Luma 3-5 — идеи для кофейни').agentIds, ['product', 'creator', 'sales']);
+  // «Luma 5–3» не диапазон: читается как Luma 5 с заданием.
+  assert.deepEqual(routeByRules('Luma 5–3 идеи').agentIds, ['sales']);
+});
+
+test('«Luma 2 — 3 группы клиентов» — поручение, а не диапазон Luma 2–3', () => {
+  const route = routeByRules('Luma 2 — 3 группы клиентов');
+  assert.deepEqual(route.agentIds, ['research']);
+  assert.equal(route.assignments.research, '3 группы клиентов');
+});
+
+test('отрицание: «Не подключай Luma 2, пусть работает Luma 4» → только Luma 4', () => {
+  const route = routeByRules('Не подключай Luma 2, пусть работает Luma 4');
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.deepEqual(route.excluded, ['research']);
+  assert.equal(route.assignments.research, undefined);
+});
+
+test('отрицание сильнее просьбы о всей команде: «всем, кроме Luma 6»', () => {
+  const route = routeByRules('Всем специалистам, кроме Luma 6: идеи для кофейни');
+  assert.deepEqual(route.agentIds, ['research', 'product', 'creator', 'sales']);
+  assert.deepEqual(route.excluded, ['finance']);
+  assert.match(route.reason, /не подключены: Luma 6/);
+});
+
+test('отрицание распространяется на перечисление: «не подключай Luma 2 и Luma 3»', () => {
+  const route = routeByRules('Не подключай Luma 2 и Luma 3, Luma 4 — слоган');
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.deepEqual(route.excluded.sort(), ['product', 'research']);
+  assert.equal(route.assignments.creator, 'слоган');
+});
+
+test('отрицание после имени и при маршрутизации по ключевым словам', () => {
+  const route = routeByRules('Luma 5 не нужен, придумай слоган и текст для привлечения клиентов');
+  assert.ok(!route.agentIds.includes('sales'));
+  assert.deepEqual(route.excluded, ['sales']);
+  // Исключён единственный профильный сотрудник → резервный выбор, но не он.
+  const fallback = fallbackRoute('Без Luma 4 придумай слоган');
+  assert.ok(!fallback.agentIds.includes('creator'));
+  assert.deepEqual(fallback.agentIds, ['product']);
+});
+
+test('«не» внутри поручения не исключает сотрудника', () => {
+  const route = routeByRules('Luma 4 — не забудь про слоган; Luma 6 — выручка без учёта налогов');
+  assert.deepEqual(route.agentIds, ['creator', 'finance']);
+  assert.deepEqual(route.excluded, []);
+  assert.equal(route.assignments.creator, 'не забудь про слоган');
 });
 
 test('явное имя главнее ключевых слов: «Luma 4, придумай слоган для привлечения клиентов» → только Luma 4', () => {

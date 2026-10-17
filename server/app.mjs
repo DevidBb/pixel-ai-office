@@ -2,7 +2,7 @@ import http from 'node:http';
 import { diag } from './llm.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
-  foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary
+  foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents
 } from './office.mjs';
 
 function sendJson(res, status, value) {
@@ -62,7 +62,9 @@ export function createApp({ config, callModel, limiter }) {
       json: true, maxTokens: config.routerMaxTokens, timeoutMs: config.routerTimeoutMs, signal, label: 'ceo-router'
     });
     const parsed = extractJson(text);
-    const allowed = new Set(AGENTS.map(a => a.id));
+    // Исключения пользователя («не подключай Luma 2») сильнее выбора модели.
+    const excluded = excludedAgents(goal);
+    const allowed = new Set(AGENTS.map(a => a.id).filter(id => !excluded.includes(id)));
     const agentIds = [...new Set((Array.isArray(parsed.agents) ? parsed.agents : []).map(String).filter(id => allowed.has(id)))].slice(0, config.maxAgents);
     if (!agentIds.length) throw new Error('CEO не выбрал ни одного известного сотрудника.');
     return { agentIds, source: 'model', reason: String(parsed.reason || 'выбор CEO').slice(0, 300) };
@@ -196,6 +198,9 @@ export function createApp({ config, callModel, limiter }) {
           ? 'Все задания адресные — итог собран из настоящих ответов сотрудников без пересказа моделью.'
           : 'Сводка CEO отключена (CEO_SUMMARY=false) — показаны ответы сотрудников.' });
       } else {
+        if (plan.tasks.every(t => t.assigned)) {
+          safeEmit('log', { agentId: 'ceo', message: 'CEO_SUMMARY=true в .env: сводка запускается даже для адресных заданий — на CPU это может добавить несколько минут. Значение auto собирает итог из ответов сотрудников.', kind: 'warning' });
+        }
         safeEmit('review-start', { agentId: 'ceo', message: 'CEO сводит результаты команды.' });
         safeEmit('agent-status', { agentId: 'ceo', status: 'thinking', task: 'Проверяет результаты команды' });
         try {
@@ -252,7 +257,8 @@ export function createApp({ config, callModel, limiter }) {
       return sendJson(res, 200, {
         ok: true, configured: Boolean(config.apiKey) || config.isLocalUrl, model: config.model, provider: config.provider,
         concurrency: config.concurrency, activeCalls: limiter.active, queuedCalls: limiter.waiting,
-        timeoutMs: config.timeoutMs, router: config.routerMode
+        timeoutMs: config.timeoutMs, router: config.routerMode, ceoSummary: config.ceoSummary,
+        agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens
       });
     }
     if (req.method === 'GET' && req.url === '/api/health/model') {

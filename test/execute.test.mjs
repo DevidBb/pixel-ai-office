@@ -135,3 +135,82 @@ test('POST /api/execute, один слоган: работает только Lu
   assert.equal(model.calls.filter(c => c.label.endsWith('ceo-summary')).length, 0);
   assert.match(ofType(events, 'final')[0].result, /✅ Luma 4 · Креатор/);
 });
+
+test('CEO_ROUTER_MODE=llm: исключение пользователя сильнее выбора модели', async () => {
+  const model = mockModel();
+  const original = model.callModel;
+  model.callModel = (messages, opts) => opts.label === 'ceo-router'
+    ? Promise.resolve({ text: '{"agents":["sales","product"],"reason":"так решила модель"}' })
+    : original(messages, opts);
+  const events = await execute('Без Luma 5 подумай, как назвать кофейню у кампуса', model, readConfig({ ...baseEnv, CEO_ROUTER_MODE: 'llm' }));
+  assert.deepEqual(ofType(events, 'plan')[0].subtasks.map(s => s.agentId), ['product']);
+  assert.deepEqual(ofType(events, 'agent-start').map(e => e.agentId), ['product']);
+});
+
+test('CEO_SUMMARY=true для адресных заданий: предупреждение в журнале и значение в /api/health', async () => {
+  const model = mockModel();
+  const events = await execute(COFFEE_GOAL, model, alwaysSummaryConfig);
+  assert.ok(ofType(events, 'log').some(e => e.kind === 'warning' && /CEO_SUMMARY=true/.test(e.message)));
+
+  const server = createApp({ config: alwaysSummaryConfig, callModel: model.callModel, limiter: model.limiter });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const health = await (await fetch(`http://127.0.0.1:${server.address().port}/api/health`)).json();
+    assert.equal(health.ceoSummary, true);
+    assert.equal(health.agentShortMaxTokens, 220);
+    assert.equal(readConfig(baseEnv).ceoSummary, 'auto');
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /api/execute: закрытие соединения клиентом отменяет все запросы к модели', async () => {
+  const signals = [];
+  let started = 0;
+  const limiter = new Limiter(1);
+  // Модель «думает» до отмены: так проверяется, что сигнал отмены доходит до каждого вызова.
+  async function callModel(messages, opts) {
+    signals.push(opts.signal);
+    await limiter.acquire(opts.signal, 5_000);
+    try {
+      started++;
+      opts.onStart?.();
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 5_000);
+        opts.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('aborted')); }, { once: true });
+      });
+      return { text: 'не должно дойти' };
+    } finally {
+      limiter.release();
+    }
+  }
+  const server = createApp({ config: autoConfig, callModel, limiter });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const controller = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/execute`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ goal: COFFEE_GOAL }), signal: controller.signal
+    });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    while (!text.includes('"type":"agent-start"')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    controller.abort();
+    const startedAt = Date.now();
+    while (signals.length < 5 || !signals.every(s => s.aborted)) {
+      if (Date.now() - startedAt > 2_000) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(signals.length, 5);
+    assert.ok(signals.every(s => s.aborted), 'все 5 вызовов модели должны получить отмену');
+    assert.equal(started, 1, 'после отмены новые вызовы модели не стартуют');
+    assert.equal(limiter.active, 0);
+    assert.equal(limiter.waiting, 0);
+  } finally {
+    server.close();
+  }
+});
