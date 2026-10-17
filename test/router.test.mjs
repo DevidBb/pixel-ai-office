@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, fallbackRoute, parseAssignments, assertSomeoneAllowed, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { routeByRules, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -295,4 +295,62 @@ test('«всем, кроме» без сотрудника после «кром
   const route = routeByRules('Напиши письмо всем, кроме постоянных клиентов');
   assert.notDeepEqual(route.agentIds, ALL);
   assert.deepEqual(route.excluded, []);
+});
+
+// Регрессия независимого ревью b7898cd: вставки между глаголом-запретом и именем.
+test('запрет со вставками исключает Luma 2, работает только Luma 4', () => {
+  for (const goal of [
+    'Не подключай, пожалуйста, Luma 2; Luma 4 — придумай слоган',
+    'Не надо подключать Luma 2; Luma 4 — придумай слоган',
+    'Не используй Luma 2; Luma 4 — придумай слоган',
+    'Исключите из задачи Luma 2; Luma 4 — придумай слоган',
+    'Не подключай к этой работе Luma 2, Luma 4 — придумай слоган',
+    'Пожалуйста, не привлекайте сегодня специалиста Luma 2. Luma 4 — придумай слоган',
+    'Не нужно задействовать Luma 2; Luma 4 — придумай слоган',
+    'Убери из команды Luma 2; Luma 4 — придумай слоган'
+  ]) {
+    const parsed = parseAssignments(goal);
+    assert.deepEqual(parsed.excluded, ['research'], goal);
+    assert.deepEqual(parsed.assignments, { creator: 'придумай слоган' }, goal);
+    assert.deepEqual(routeByRules(goal).agentIds, ['creator'], goal);
+    assert.deepEqual(fallbackRoute(goal).agentIds, ['creator'], goal);
+  }
+});
+
+test('вставки не делают запретом обычное «не»: прежние регрессии держатся', () => {
+  for (const [goal, expected] of [
+    ['Не забудь подключить Luma 4 — придумай слоган', ['creator']],
+    ['Без задержки запусти Luma 5 — продажи', ['sales']],
+    ['Не используй клише, Luma 4 — придумай слоган', ['creator']],
+    ['Без лишних слов, Luma 2 — 3 группы клиентов', ['research']],
+    ['Luma 4 не нужно исключать', ['creator']]
+  ]) {
+    assert.deepEqual(parseAssignments(goal).excluded, [], goal);
+    assert.deepEqual(routeByRules(goal).agentIds, expected, goal);
+  }
+});
+
+// Регрессия: сотрудник без своего задания не получает чужое через «;» или конец предложения.
+test('поручение не перескакивает через «;» и точку, но делится через «и»', () => {
+  assert.deepEqual(parseAssignments('Luma 2; Luma 4 — придумай слоган').assignments, { research: '', creator: 'придумай слоган' });
+  assert.deepEqual(parseAssignments('Luma 2. Luma 4 — придумай слоган').assignments, { research: '', creator: 'придумай слоган' });
+  assert.deepEqual(parseAssignments('Luma 2 и Luma 4 — придумай слоган').assignments, { research: 'придумай слоган', creator: 'придумай слоган' });
+  assert.deepEqual(parseAssignments('Luma 2, Luma 4 — придумай слоган').assignments, { research: 'придумай слоган', creator: 'придумай слоган' });
+  // Сотрудник без своего задания получает ролевую часть общей цели, а не чужое поручение.
+  const goal = 'Luma 2; Luma 4 — придумай слоган для кофейни';
+  const task = buildPlan(goal, routeByRules(goal)).tasks.find(t => t.agentId === 'research');
+  assert.equal(task.assigned, false);
+  assert.match(task.objective, /^Выполни часть цели, относящуюся к твоей роли/);
+});
+
+test('нераспознанное «не» рядом с именем: сотрудник назначен, в плане предупреждение', () => {
+  const goal = 'Не забудь подключить Luma 4 — придумай слоган';
+  const route = routeByRules(goal);
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.deepEqual(parseAssignments(goal).uncertain, ['creator']);
+  assert.match(buildPlan(goal, route).summary, /Проверь: рядом с Luma 4 есть «не»\/«без»/);
+  // Распознанный запрет и запятая-граница предупреждения не дают.
+  assert.equal(uncertainNote('Не подключай, пожалуйста, Luma 2; Luma 4 — слоган', ['creator']), '');
+  assert.equal(uncertainNote('Не стесняйся, Luma 4 — слоган', ['creator']), '');
+  assert.equal(uncertainNote(COFFEE_GOAL, Object.keys(COFFEE_ASSIGNMENTS)), '');
 });

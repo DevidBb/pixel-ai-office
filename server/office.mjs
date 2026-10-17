@@ -51,10 +51,22 @@ const ROLE_MENTIONS = [
 // «без участия Luma 5», «исключи Luma 3». Произвольное «не»/«без» рядом («Не забудь подключить Luma 4»,
 // «Без задержки запусти Luma 5») исключением не считается: лучше лишний исполнитель, чем пропавший.
 const EXCLUDE_FILLER = String.raw`(?:(?:сотрудник|специалист|агент|исполнител)\p{L}*\s+|(?:участия|помощи)\s+)?`;
+// Предлоги-исключения действуют только вплотную к имени: «без» слишком часто значит другое («без задержки»).
+const ADJACENT_EXCLUDE = String.raw`(?:кроме|исключая|за\s+исключением|без)`;
+// Глаголы-исключения однозначны, поэтому между ними и именем допускаются вставки:
+// «Не подключай, пожалуйста, Luma 2», «Исключите из задачи Luma 2», «Не надо подключать к этой работе Luma 2».
+const EXCLUDE_VERB = String.raw`(?:исключи(?:те)?|убери(?:те)?|отключи(?:те)?` +
+  String.raw`|не\s+(?:подключай|привлекай|задействуй|используй|назначай|включай|добавляй|приглашай|зови|бери|трогай|ставь)(?:те)?` +
+  String.raw`|не\s+(?:надо|нужно|стоит|будем|хочу)\s+(?:подключать|привлекать|задействовать|использовать|назначать|включать|добавлять|приглашать|звать|брать|трогать))`;
+const POLITE = String.raw`\s*,?\s*(?:пожалуйста|плиз)\s*,?`;
+// До четырёх слов без знаков препинания (запятая — только вокруг «пожалуйста»): «Не используй клише, Luma 4 — …» не исключение.
+const EXCLUDE_GAP = String.raw`(?:${POLITE}|\s+[\p{L}\d-]+){0,4}`;
 const NEGATION_BEFORE = new RegExp(
-  String.raw`(?<!\p{L})(?:кроме|исключая|за\s+исключением|без|исключи(?:те)?(?!\p{L})|убери|отключи|не\s+(?:подключай\p{L}*|привлекай\p{L}*|задействуй\p{L}*|назначай\p{L}*|зови|бери|трогай|ставь))\s+${EXCLUDE_FILLER}$`,
+  String.raw`(?:(?<!\p{L})${ADJACENT_EXCLUDE}|(?<!\p{L})${EXCLUDE_VERB}(?!\p{L})${EXCLUDE_GAP})\s+${EXCLUDE_FILLER}$`,
   'iu'
 );
+// «Не»/«без» в том же фрагменте, но не распознанное как запрет — сотрудник остаётся, а CEO предупреждает.
+const UNCERTAIN_NEGATION = /(?<!\p{L})(?:не|без)(?!\p{L})[^,;.:!?\n]*$/iu;
 // После имени: «Luma 2 не нужен», «Luma 5 не участвует», «Luma 4 не нужно», «Luma 3 не надо подключать»,
 // «Luma 6 пусть отдыхает», «Luma 2 исключить». Но «Luma 4 не нужно исключать» — не исключение.
 const NEGATION_AFTER = new RegExp(
@@ -132,6 +144,7 @@ export function parseAssignments(goal) {
   const excluded = new Set();
   const spans = [];
   const only = new Set();
+  const uncertain = new Set();
   let pending = [];
   let previous = null; // 'negated' | 'only' | null — для перечислений «Luma 2 и Luma 3»
   for (let i = 0; i < mentions.length; i++) {
@@ -149,6 +162,7 @@ export function parseAssignments(goal) {
     const isOnly = ONLY_BEFORE.test(prefix) || (previous === 'only' && inList);
     const negated = !isOnly && (NEGATION_BEFORE.test(prefix) || NEGATION_AFTER.test(tail) || (previous === 'negated' && inList));
     previous = isOnly ? 'only' : negated ? 'negated' : null;
+    if (!isOnly && !negated && UNCERTAIN_NEGATION.test(prefix)) ids.forEach(id => uncertain.add(id));
     if (isOnly) {
       ids.forEach(id => only.add(id));
       if (ONLY_VERB_CLAUSE.test(clause)) clause = '';
@@ -160,7 +174,15 @@ export function parseAssignments(goal) {
     }
     if (!ids.length) continue;
     pending.push(...ids);
-    if (!clause || /^(?:и|или|а также|,)$/iu.test(clause)) continue;
+    if (!clause || /^(?:и|или|а также|,)$/iu.test(clause)) {
+      // Общее поручение передаётся только внутри фрагмента («Luma 2 и Luma 4 — слоган»),
+      // но не через «;» или конец предложения («Luma 2; Luma 4 — слоган»).
+      if (stop >= 0) {
+        for (const agentId of pending) if (!assignments.has(agentId)) assignments.set(agentId, '');
+        pending = [];
+      }
+      continue;
+    }
     for (const agentId of pending) {
       const previous = assignments.get(agentId);
       assignments.set(agentId, previous && previous !== clause ? `${previous}; ${clause}` : clause);
@@ -181,7 +203,8 @@ export function parseAssignments(goal) {
   context = context
     .replace(/\s*[:;,](?:[\s;,]*[;,])*\s*(?=\.|$)/g, '')
     .replace(/(?:\s*[;,]\s*){2,}/g, '; ').replace(/\s+([.;,])/g, '$1').replace(/\s{2,}/g, ' ').trim();
-  return { assignments: Object.fromEntries(assignments), excluded: [...excluded], context };
+  for (const agentId of excluded) uncertain.delete(agentId);
+  return { assignments: Object.fromEntries(assignments), excluded: [...excluded], uncertain: [...uncertain], context };
 }
 
 export function wantsWholeTeam(goal) {
@@ -280,13 +303,21 @@ function clip(text, max) {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
 
+/** Предупреждение о «не»/«без» рядом с назначенным сотрудником, которое не распознано как запрет. */
+export function uncertainNote(goal, agentIds) {
+  const doubtful = parseAssignments(goal).uncertain.filter(id => agentIds.includes(id));
+  return doubtful.length
+    ? ` Проверь: рядом с ${names(doubtful)} есть «не»/«без», но это не распознано как запрет — сотрудник назначен. Чтобы исключить, напиши «не подключай Luma N» или «без участия Luma N».`
+    : '';
+}
+
 export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxTokens = 220 } = {}) {
   const single = route.agentIds.length === 1;
   const short = isShortRequest(goal);
   const assignments = route.assignments || {};
   const context = route.context || goal;
   return {
-    summary: `CEO назначил: ${route.agentIds.map(id => `${agentById(id).name} (${agentById(id).role})`).join(', ')} — ${route.reason}.`,
+    summary: `CEO назначил: ${route.agentIds.map(id => `${agentById(id).name} (${agentById(id).role})`).join(', ')} — ${route.reason}.${uncertainNote(goal, route.agentIds)}`,
     tasks: route.agentIds.map(agentId => {
       const agent = agentById(agentId);
       const assignment = assignments[agentId];

@@ -265,3 +265,19 @@ for (const [goal, expected] of [
     assert.deepEqual(ofType(events, 'agent-start').map(e => e.agentId).sort(), [...expected].sort());
   });
 }
+
+// Регрессия независимого ревью b7898cd на уровне HTTP: даже в llm-режиме явный маршрут не назначает исключённого.
+test('POST /api/execute, CEO_ROUTER_MODE=llm: «Не подключай, пожалуйста, Luma 2; Luma 4 — …» → только Luma 4', async () => {
+  const model = mockModel();
+  const events = await execute('Не подключай, пожалуйста, Luma 2; Luma 4 — придумай слоган', model, readConfig({ ...baseEnv, CEO_ROUTER_MODE: 'llm' }));
+  assert.equal(model.calls.filter(c => c.label === 'ceo-router').length, 0);
+  assert.deepEqual(ofType(events, 'agent-start').map(e => e.agentId), ['creator']);
+  assert.equal(ofType(events, 'agent-result')[0].result, 'ОТВЕТ creator: придумай слоган');
+  assert.ok(!ofType(events, 'log').some(e => /Проверь: рядом/.test(e.message)));
+});
+
+test('POST /api/execute: нераспознанное «не» — предупреждение в журнале CEO', async () => {
+  const events = await execute('Не забудь подключить Luma 4 — придумай слоган', mockModel());
+  assert.deepEqual(ofType(events, 'agent-start').map(e => e.agentId), ['creator']);
+  assert.ok(ofType(events, 'log').some(e => e.agentId === 'ceo' && e.kind === 'warning' && /Проверь: рядом с Luma 4/.test(e.message)));
+});

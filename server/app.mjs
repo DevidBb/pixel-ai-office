@@ -3,7 +3,7 @@ import { diag } from './llm.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed
+  assertSomeoneAllowed, uncertainNote
 } from './office.mjs';
 
 function sendJson(res, status, value) {
@@ -130,6 +130,8 @@ export function createApp({ config, callModel, limiter }) {
       const route = await routeGoal(goal, signal);
       if (cancelled()) return;
       const plan = buildPlan(goal, route, config);
+      const doubtful = uncertainNote(goal, route.agentIds);
+      if (doubtful) safeEmit('log', { agentId: 'ceo', message: doubtful.trim(), kind: 'warning' });
       diag(`[run ${runId}] маршрут`, { method: route.method, source: route.source, agents: route.agentIds, ms: Date.now() - runStarted });
       safeEmit('plan', {
         summary: plan.summary,
