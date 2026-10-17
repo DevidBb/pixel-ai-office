@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, fallbackRoute, parseAssignments, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { routeByRules, fallbackRoute, parseAssignments, assertSomeoneAllowed, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -173,4 +173,68 @@ test('обычная задача по ключевым словам работ�
 test('поиск чужих имён в ответе агента', () => {
   assert.deepEqual(foreignAttributions('sales', '## Luma 2\nгруппы\n## Luma 5\nканалы\nLuma 6: 90 €'), ['Luma 2', 'Luma 6']);
   assert.deepEqual(foreignAttributions('creator', 'Слоган: «Кофе между парами»'), []);
+});
+
+// Регрессия ревью PR #2 (коммит 171fb91): обычное «не»/«без» рядом с именем не должно исключать сотрудника.
+test('«Не забудь подключить Luma 4 — придумай слоган» назначает Luma 4', () => {
+  const goal = 'Не забудь подключить Luma 4 — придумай слоган';
+  const parsed = parseAssignments(goal);
+  assert.deepEqual(parsed.excluded, []);
+  assert.equal(parsed.assignments.creator, 'придумай слоган');
+  assert.deepEqual(routeByRules(goal).agentIds, ['creator']);
+});
+
+test('«Без задержки запусти Luma 5 — продажи» назначает только Luma 5', () => {
+  const goal = 'Без задержки запусти Luma 5 — продажи';
+  const parsed = parseAssignments(goal);
+  assert.deepEqual(parsed.excluded, []);
+  assert.equal(parsed.assignments.sales, 'продажи');
+  assert.deepEqual(routeByRules(goal).agentIds, ['sales']);
+});
+
+test('«Luma 4 не нужно исключать» оставляет Luma 4', () => {
+  const goal = 'Luma 4 не нужно исключать';
+  assert.deepEqual(parseAssignments(goal).excluded, []);
+  assert.deepEqual(routeByRules(goal).agentIds, ['creator']);
+  assert.deepEqual(fallbackRoute(goal).agentIds, ['creator']);
+});
+
+test('другие «не»/«без» рядом с именем тоже не исключают', () => {
+  for (const [goal, expected] of [
+    ['Не стесняйся, Luma 4 — придумай слоган', ['creator']],
+    ['Не торопясь, пусть Luma 6 посчитает выручку', ['finance']],
+    ['Без лишних слов, Luma 2 — 3 группы клиентов', ['research']],
+    ['Luma 3 не должен забыть про цены — 3 напитка', ['product']]
+  ]) {
+    assert.deepEqual(parseAssignments(goal).excluded, [], goal);
+    assert.deepEqual(routeByRules(goal).agentIds, expected, goal);
+  }
+});
+
+test('явные формы исключения по-прежнему работают', () => {
+  for (const [goal, excluded] of [
+    ['Без участия Luma 5 придумай слоган', ['sales']],
+    ['Без Luma 5 придумай слоган', ['sales']],
+    ['Исключи Luma 3, Luma 4 — слоган', ['product']],
+    ['Не привлекай специалиста Luma 6. Luma 4 — слоган', ['finance']],
+    ['Luma 2 не нужно, Luma 4 — слоган', ['research']],
+    ['Luma 2 не надо подключать; Luma 4 — слоган', ['research']],
+    ['Luma 6 пусть отдыхает, Luma 4 — слоган', ['finance']],
+    ['Luma 5 не участвует. Luma 4 — слоган', ['sales']]
+  ]) {
+    const route = routeByRules(goal);
+    assert.deepEqual(route.excluded, excluded, goal);
+    assert.ok(!route.agentIds.some(id => excluded.includes(id)), goal);
+  }
+});
+
+// Регрессия ревью PR #2: если исключены все, никого запрещённого назначать нельзя.
+test('все исключены: правила не назначают, fallbackRoute бросает понятную ошибку', () => {
+  for (const goal of ['Всем специалистам, кроме Luma 2–6', 'Кроме Luma 2–6, придумай слоган', 'Не подключай Luma 2, Luma 3, Luma 4, Luma 5 и Luma 6']) {
+    assert.deepEqual(parseAssignments(goal).excluded.sort(), [...ALL].sort(), goal);
+    assert.equal(routeByRules(goal), null, goal);
+    assert.throws(() => fallbackRoute(goal), /Все исполнители исключены/, goal);
+  }
+  assert.throws(() => assertSomeoneAllowed(ALL), /укажи хотя бы одного сотрудника/);
+  assert.doesNotThrow(() => assertSomeoneAllowed(['research', 'product', 'creator', 'sales']));
 });

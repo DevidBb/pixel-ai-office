@@ -214,3 +214,33 @@ test('POST /api/execute: закрытие соединения клиентом 
     server.close();
   }
 });
+
+// Регрессия ревью PR #2: при исключении всех сервер отвечает событием error и не вызывает модель ни для кого.
+for (const routerMode of ['auto', 'rules', 'llm']) {
+  test(`POST /api/execute, CEO_ROUTER_MODE=${routerMode}: «кроме Luma 2–6» → error, никто не назначен`, async () => {
+    const model = mockModel();
+    const original = model.callModel;
+    // Даже если модель-маршрутизатор выберет запрещённого, до неё дело дойти не должно.
+    model.callModel = (messages, opts) => opts.label === 'ceo-router'
+      ? Promise.resolve({ text: '{"agents":["product"],"reason":"модель"}' })
+      : original(messages, opts);
+    const events = await execute('Всем специалистам, кроме Luma 2–6: идеи для кофейни', model, readConfig({ ...baseEnv, CEO_ROUTER_MODE: routerMode }));
+    assert.equal(model.calls.length, 0, 'модель не вызывается');
+    assert.equal(ofType(events, 'plan').length, 0);
+    assert.equal(ofType(events, 'agent-start').length, 0);
+    assert.match(ofType(events, 'error')[0].message, /Все исполнители исключены/);
+  });
+}
+
+test('CEO_ROUTER_MODE=llm: модель выбрала только исключённого → резервный выбор не назначает его', async () => {
+  const model = mockModel();
+  const original = model.callModel;
+  model.callModel = (messages, opts) => opts.label === 'ceo-router'
+    ? Promise.resolve({ text: '{"agents":["product"],"reason":"модель"}' })
+    : original(messages, opts);
+  const events = await execute('Не подключай Luma 3, подумай про кофейню у кампуса', model, readConfig({ ...baseEnv, CEO_ROUTER_MODE: 'llm' }));
+  const assigned = ofType(events, 'plan')[0].subtasks.map(s => s.agentId);
+  assert.ok(assigned.length > 0);
+  assert.ok(!assigned.includes('product'), `назначен исключённый: ${assigned}`);
+  assert.ok(!ofType(events, 'agent-start').some(e => e.agentId === 'product'));
+});

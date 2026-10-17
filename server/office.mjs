@@ -44,10 +44,22 @@ const ROLE_MENTIONS = [
   ['sales', /(?<!\p{L})(?:менеджер\p{L}*\s+(?:по\s+)?продаж\p{L}*|продажник\p{L}*)\s*(?=[:—–-])/giu],
   ['finance', /(?<!\p{L})(?:финансов\p{L}*\s+аналитик\p{L}*|финансист\p{L}*)\s*(?=[:—–-])/giu]
 ];
-// Отрицание перед упоминанием в том же фрагменте («не подключай Luma 2», «кроме Luma 6», «без Luma 5»)
-// или сразу после него («Luma 2 не нужен»).
-const NEGATION_BEFORE = /(?<!\p{L})(?:не|без|кроме|исключая|за\s+исключением)(?!\p{L})[^,;.:!?\n]*$/iu;
-const NEGATION_AFTER = /^\s*[-—–:,]?\s*(?:не\s+(?:нуж\p{L}*|надо|участву\p{L}*|подключа\p{L}*|привлека\p{L}*|трога\p{L}*|работа\p{L}*)|пусть\s+отдыха\p{L}*|отдыха\p{L}*|пропуска\p{L}*)(?!\p{L})/iu;
+// Исключение — только конкретная конструкция вплотную к имени: «не подключай Luma 2», «кроме Luma 6»,
+// «без участия Luma 5», «исключи Luma 3». Произвольное «не»/«без» рядом («Не забудь подключить Luma 4»,
+// «Без задержки запусти Luma 5») исключением не считается: лучше лишний исполнитель, чем пропавший.
+const EXCLUDE_FILLER = String.raw`(?:(?:сотрудник|специалист|агент|исполнител)\p{L}*\s+|(?:участия|помощи)\s+)?`;
+const NEGATION_BEFORE = new RegExp(
+  String.raw`(?<!\p{L})(?:кроме|исключая|за\s+исключением|без|исключи\p{L}*|убери|отключи|не\s+(?:подключай\p{L}*|привлекай\p{L}*|задействуй\p{L}*|назначай\p{L}*|зови|бери|трогай|ставь))\s+${EXCLUDE_FILLER}$`,
+  'iu'
+);
+// После имени: «Luma 2 не нужен», «Luma 5 не участвует», «Luma 4 не нужно», «Luma 3 не надо подключать»,
+// «Luma 6 пусть отдыхает», «Luma 2 исключить». Но «Luma 4 не нужно исключать» — не исключение.
+const NEGATION_AFTER = new RegExp(
+  String.raw`^\s*[-—–:,]?\s*(?:не\s+(?:нуж(?:ен|на|ны)|участву\p{L}*|требуется|подключай\p{L}*|привлекай\p{L}*)(?!\p{L})` +
+  String.raw`|не\s+(?:нужно|надо)(?=\s*(?:$|[,.;:!?]|(?:подключать|привлекать|звать|задействовать|трогать)(?!\p{L})))` +
+  String.raw`|пусть\s+отдыха\p{L}*|отдыха(?:ет|ют)(?!\p{L})|исключ(?:ить|аем|ён|ен|ена|ены)(?!\p{L}))`,
+  'iu'
+);
 // «не подключай Luma 2 и Luma 3» — отрицание действует на перечисление через «и»/«или»;
 // через запятую — только если у следующего сотрудника нет своего поручения («Luma 3, Luma 4 — слоган»).
 const LIST_AND = /^\s*,?\s*(?:и|или)\s*$/iu;
@@ -120,7 +132,8 @@ export function parseAssignments(goal) {
     spans.push([mention.start, mention.end + raw.length]);
     const ids = mention.agentIds.filter(id => id !== CEO.id);
     const clause = cleanClause(raw);
-    const listed = previousNegated && (LIST_AND.test(prefix) || (LIST_COMMA.test(prefix) && !clause));
+    const ownClause = clause && !/^(?:и|или|а также)$/iu.test(clause);
+    const listed = previousNegated && (LIST_AND.test(prefix) || (LIST_COMMA.test(prefix) && !ownClause));
     const negated = NEGATION_BEFORE.test(prefix) || NEGATION_AFTER.test(tail) || listed;
     previousNegated = negated;
     if (negated) {
@@ -168,6 +181,13 @@ export function asksForOne(goal) {
 /** Сотрудники, которых пользователь явно исключил («не подключай Luma 2», «кроме Luma 6»). */
 export function excludedAgents(goal) {
   return parseAssignments(goal).excluded;
+}
+
+/** Пользователь исключил всех исполнителей: назначать некого, и запрещённого назначать нельзя. */
+export function assertSomeoneAllowed(excluded) {
+  if (AGENTS.every(a => excluded.includes(a.id))) {
+    throw new Error(`Все исполнители исключены по просьбе пользователя (${names(excluded)}). Назначать некого — укажи хотя бы одного сотрудника.`);
+  }
 }
 
 function scoreAgents(goal) {
@@ -225,7 +245,8 @@ export function fallbackRoute(goal, maxAgents = 5) {
   const quick = routeByRules(goal, maxAgents);
   if (quick) return quick;
   const excluded = excludedAgents(goal);
-  const agentId = ['product', ...AGENTS.map(a => a.id)].find(id => !excluded.includes(id)) || 'product';
+  assertSomeoneAllowed(excluded);
+  const agentId = ['product', ...AGENTS.map(a => a.id)].find(id => !excluded.includes(id));
   return { agentIds: [agentId], excluded, source: 'fallback', reason: withExclusions(`профиль не определён — задача передана: ${agentById(agentId).role}`, excluded) };
 }
 

@@ -2,7 +2,8 @@ import http from 'node:http';
 import { diag } from './llm.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
-  foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents
+  foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
+  assertSomeoneAllowed
 } from './office.mjs';
 
 function sendJson(res, status, value) {
@@ -71,6 +72,8 @@ export function createApp({ config, callModel, limiter }) {
   }
 
   async function routeGoal(goal, signal) {
+    // Если исключены все, ни правила, ни модель, ни резервный выбор не должны никого назначать.
+    assertSomeoneAllowed(excludedAgents(goal));
     // Явные указания пользователя действуют в любом режиме маршрутизации.
     const explicit = routeByExplicit(goal, config.maxAgents);
     if (explicit) return { ...explicit, method: 'rules' };
