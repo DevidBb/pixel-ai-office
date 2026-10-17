@@ -1,0 +1,50 @@
+node_modules/
+dist/
+.vite/
+.env
+*.local
+
+# Secrets / environment (keep .env.example tracked)
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+secrets/
+credentials*.json
+service-account*.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Backups / temp
+*.bak
+*.bak-*
+*.backup
+*.orig
+*.tmp
+*.swp
+*~
+
+# Build / cache
+build/
+coverage/
+.cache/
+*.tsbuildinfo
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local tooling
+graphify-out/
