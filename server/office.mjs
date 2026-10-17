@@ -25,7 +25,10 @@ const COMPLEX_MARKERS = ['бизнес', 'стартап', 'запуст', 'за
 // Явная просьба подключить всю команду: «всеми пятью специалистами», «всем сотрудникам», «всем пятерым».
 const ALL_TEAM_PATTERNS = [
   /(?<!\p{L})(?:все|всем|всеми|всех|всей)\s+(?:(?:пят\p{L}*|5)\s+)?(?:специалист|сотрудник|команд|агент|исполнител)\p{L}*/iu,
-  /(?<!\p{L})(?:все|всем|всеми|всех|всей)\s+(?:пятью|пятер\p{L}*|пятёр\p{L}*)/iu
+  /(?<!\p{L})(?:все|всем|всеми|всех|всей)\s+(?:пятью|пятер\p{L}*|пятёр\p{L}*)/iu,
+  // «Всем, кроме Luma 4», «все за исключением Luma 6» — только если после «кроме» назван сотрудник
+  // (а не «всем, кроме постоянных клиентов»).
+  /(?<!\p{L})(?:все|всем|всеми|всех)\s*,?\s*(?:кроме|за\s+исключением|помимо)\s+(?:(?:сотрудник|специалист|агент)\p{L}*\s+)?(?:luma|люма|исследовател|продуктолог|креатор|менеджер\p{L}*\s+(?:по\s+)?продаж|финансов\p{L}*\s+аналитик|финансист)/iu
 ];
 
 // Упоминание сотрудника по имени («Luma 4», «Люма 4») или по роли с разделителем («Креатор — слоган»).
@@ -49,7 +52,7 @@ const ROLE_MENTIONS = [
 // «Без задержки запусти Luma 5») исключением не считается: лучше лишний исполнитель, чем пропавший.
 const EXCLUDE_FILLER = String.raw`(?:(?:сотрудник|специалист|агент|исполнител)\p{L}*\s+|(?:участия|помощи)\s+)?`;
 const NEGATION_BEFORE = new RegExp(
-  String.raw`(?<!\p{L})(?:кроме|исключая|за\s+исключением|без|исключи\p{L}*|убери|отключи|не\s+(?:подключай\p{L}*|привлекай\p{L}*|задействуй\p{L}*|назначай\p{L}*|зови|бери|трогай|ставь))\s+${EXCLUDE_FILLER}$`,
+  String.raw`(?<!\p{L})(?:кроме|исключая|за\s+исключением|без|исключи(?:те)?(?!\p{L})|убери|отключи|не\s+(?:подключай\p{L}*|привлекай\p{L}*|задействуй\p{L}*|назначай\p{L}*|зови|бери|трогай|ставь))\s+${EXCLUDE_FILLER}$`,
   'iu'
 );
 // После имени: «Luma 2 не нужен», «Luma 5 не участвует», «Luma 4 не нужно», «Luma 3 не надо подключать»,
@@ -62,6 +65,14 @@ const NEGATION_AFTER = new RegExp(
 );
 // «не подключай Luma 2 и Luma 3» — отрицание действует на перечисление через «и»/«или»;
 // через запятую — только если у следующего сотрудника нет своего поручения («Luma 3, Luma 4 — слоган»).
+// «Никого, кроме Luma 4, не подключай», «Не назначай никого, кроме Luma 4» — разрешён ТОЛЬКО названный.
+// Без отрицательного местоимения («Всем, кроме Luma 4») «кроме» по-прежнему исключает.
+const ONLY_BEFORE = new RegExp(
+  String.raw`(?<!\p{L})(?:никого|никому|никем|никаких|никто|ни\s+одного|ни\s+одному)(?!\p{L})[^.;!?\n]*(?<!\p{L})(?:кроме|за\s+исключением|помимо)\s+${EXCLUDE_FILLER}$`,
+  'iu'
+);
+// Хвост той же конструкции («…, не подключай») — часть запрета для остальных, а не поручение.
+const ONLY_VERB_CLAUSE = /^(?:не\s+)?(?:подключай|назначай|привлекай|задействуй|зови|бери|трогай|ставь)\p{L}*$/iu;
 const LIST_AND = /^\s*,?\s*(?:и|или)\s*$/iu;
 const LIST_COMMA = /^\s*,\s*$/u;
 // Конец адресного поручения: «;», перевод строки или точка в конце предложения.
@@ -120,8 +131,9 @@ export function parseAssignments(goal) {
   const assignments = new Map();
   const excluded = new Set();
   const spans = [];
+  const only = new Set();
   let pending = [];
-  let previousNegated = false;
+  let previous = null; // 'negated' | 'only' | null — для перечислений «Luma 2 и Luma 3»
   for (let i = 0; i < mentions.length; i++) {
     const mention = mentions[i];
     const prefix = goal.slice(mentions[i - 1]?.end ?? 0, mention.start);
@@ -131,11 +143,16 @@ export function parseAssignments(goal) {
     const raw = stop >= 0 ? tail.slice(0, stop) : tail;
     spans.push([mention.start, mention.end + raw.length]);
     const ids = mention.agentIds.filter(id => id !== CEO.id);
-    const clause = cleanClause(raw);
+    let clause = cleanClause(raw);
     const ownClause = clause && !/^(?:и|или|а также)$/iu.test(clause);
-    const listed = previousNegated && (LIST_AND.test(prefix) || (LIST_COMMA.test(prefix) && !ownClause));
-    const negated = NEGATION_BEFORE.test(prefix) || NEGATION_AFTER.test(tail) || listed;
-    previousNegated = negated;
+    const inList = LIST_AND.test(prefix) || (LIST_COMMA.test(prefix) && !ownClause);
+    const isOnly = ONLY_BEFORE.test(prefix) || (previous === 'only' && inList);
+    const negated = !isOnly && (NEGATION_BEFORE.test(prefix) || NEGATION_AFTER.test(tail) || (previous === 'negated' && inList));
+    previous = isOnly ? 'only' : negated ? 'negated' : null;
+    if (isOnly) {
+      ids.forEach(id => only.add(id));
+      if (ONLY_VERB_CLAUSE.test(clause)) clause = '';
+    }
     if (negated) {
       ids.forEach(id => excluded.add(id));
       pending = [];
@@ -151,6 +168,7 @@ export function parseAssignments(goal) {
     pending = [];
   }
   for (const agentId of pending) if (!assignments.has(agentId)) assignments.set(agentId, '');
+  if (only.size) for (const agent of AGENTS) if (!only.has(agent.id)) excluded.add(agent.id);
   for (const agentId of excluded) assignments.delete(agentId);
 
   let context = '';

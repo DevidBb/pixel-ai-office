@@ -244,3 +244,24 @@ test('CEO_ROUTER_MODE=llm: модель выбрала только исключ
   assert.ok(!assigned.includes('product'), `назначен исключённый: ${assigned}`);
   assert.ok(!ofType(events, 'agent-start').some(e => e.agentId === 'product'));
 });
+
+// Регрессия ревью PR #2 (a05b6cd): выбор сотрудников по «исключительно» и «никого, кроме» на уровне HTTP.
+for (const [goal, expected] of [
+  ['Исключительно Luma 4 — придумай слоган', ['creator']],
+  ['Никого, кроме Luma 4, не подключай', ['creator']],
+  ['Не назначай никого, кроме Luma 4 — придумай слоган', ['creator']],
+  ['Всем, кроме Luma 4', ['research', 'product', 'sales', 'finance']]
+]) {
+  test(`POST /api/execute, CEO_ROUTER_MODE=llm: «${goal}» → ${expected.join(', ')}`, async () => {
+    const model = mockModel();
+    const original = model.callModel;
+    // Модель-маршрутизатор выбрала бы другого — явное указание пользователя должно победить без её вызова.
+    model.callModel = (messages, opts) => opts.label === 'ceo-router'
+      ? Promise.resolve({ text: '{"agents":["sales"],"reason":"модель"}' })
+      : original(messages, opts);
+    const events = await execute(goal, model, readConfig({ ...baseEnv, CEO_ROUTER_MODE: 'llm' }));
+    assert.equal(model.calls.filter(c => c.label === 'ceo-router').length, 0);
+    assert.deepEqual(ofType(events, 'plan')[0].subtasks.map(s => s.agentId), expected);
+    assert.deepEqual(ofType(events, 'agent-start').map(e => e.agentId).sort(), [...expected].sort());
+  });
+}

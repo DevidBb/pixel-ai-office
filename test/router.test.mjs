@@ -238,3 +238,61 @@ test('все исключены: правила не назначают, fallbac
   assert.throws(() => assertSomeoneAllowed(ALL), /укажи хотя бы одного сотрудника/);
   assert.doesNotThrow(() => assertSomeoneAllowed(['research', 'product', 'creator', 'sales']));
 });
+
+// Регрессия ревью PR #2 (коммит a05b6cd): «исключительно» — это «только», а не «исключи».
+test('«Исключительно Luma 4 — придумай слоган» назначает Luma 4, никого не исключая', () => {
+  const goal = 'Исключительно Luma 4 — придумай слоган';
+  const parsed = parseAssignments(goal);
+  assert.deepEqual(parsed.excluded, []);
+  assert.equal(parsed.assignments.creator, 'придумай слоган');
+  assert.deepEqual(routeByRules(goal).agentIds, ['creator']);
+  assert.deepEqual(fallbackRoute(goal).agentIds, ['creator']);
+});
+
+test('«исключи» / «исключите» по-прежнему исключают', () => {
+  for (const goal of ['Исключи Luma 4, Luma 5 — продажи', 'Исключите Luma 4, Luma 5 — продажи']) {
+    const route = routeByRules(goal);
+    assert.deepEqual(route.excluded, ['creator'], goal);
+    assert.deepEqual(route.agentIds, ['sales'], goal);
+  }
+});
+
+// Регрессия ревью PR #2: «никого, кроме X» разрешает ТОЛЬКО X; «всем, кроме X» исключает X.
+test('«Никого, кроме Luma 4, не подключай» → только Luma 4', () => {
+  const goal = 'Никого, кроме Luma 4, не подключай';
+  const parsed = parseAssignments(goal);
+  assert.deepEqual(parsed.excluded.sort(), ['finance', 'product', 'research', 'sales']);
+  assert.equal(parsed.assignments.creator, '', '«не подключай» относится к остальным и не является поручением');
+  const route = routeByRules(goal);
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.deepEqual(fallbackRoute(goal).agentIds, ['creator']);
+  assert.equal(buildPlan(goal, route).tasks[0].objective, goal);
+});
+
+test('«Не назначай никого, кроме Luma 4 — придумай слоган» → только Luma 4 со своим заданием', () => {
+  const goal = 'Не назначай никого, кроме Luma 4 — придумай слоган';
+  const route = routeByRules(goal);
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.equal(route.assignments.creator, 'придумай слоган');
+  assert.deepEqual(fallbackRoute(goal).agentIds, ['creator']);
+});
+
+test('«никого, кроме» с перечислением и другими формами', () => {
+  assert.deepEqual(routeByRules('Никого не подключай, кроме Luma 4 и Luma 6').agentIds, ['creator', 'finance']);
+  assert.deepEqual(routeByRules('Ни одного сотрудника, кроме Luma 2 — 3 группы клиентов').agentIds, ['research']);
+  assert.deepEqual(routeByRules('Никому, кроме Luma 6, не давай задание: посчитай выручку').agentIds, ['finance']);
+});
+
+test('противоположный контекст: «Всем, кроме Luma 4» исключает Luma 4 и подключает остальных', () => {
+  for (const goal of ['Всем, кроме Luma 4', 'Всем специалистам, кроме Luma 4: идеи для кофейни', 'Все за исключением Luma 4, идеи для кофейни']) {
+    const route = routeByRules(goal);
+    assert.deepEqual(route.excluded, ['creator'], goal);
+    assert.deepEqual(route.agentIds, ['research', 'product', 'sales', 'finance'], goal);
+  }
+});
+
+test('«всем, кроме» без сотрудника после «кроме» не включает всю команду', () => {
+  const route = routeByRules('Напиши письмо всем, кроме постоянных клиентов');
+  assert.notDeepEqual(route.agentIds, ALL);
+  assert.deepEqual(route.excluded, []);
+});
