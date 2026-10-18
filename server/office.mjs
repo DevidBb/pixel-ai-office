@@ -379,9 +379,13 @@ function evaluateArithmetic(expression) {
 export function arithmeticHints(text) {
   const hints = [];
   for (const [expression] of text.matchAll(ARITHMETIC)) {
-    if (/^\d+\s*-\s*\d+$/.test(expression.trim())) continue; // «2-3 варианта», «10-15 минут» — диапазон, а не вычитание
+    const trimmed = expression.trim();
+    // Только «-» между числами — диапазон («2-3 варианта»), телефон («123-45-67») или номер, а не вычитание.
+    if (/^\d+(?:\s*-\s*\d+)+$/.test(trimmed)) continue;
+    // дд/мм/гггг — дата, а не деление.
+    if (/^\d{1,2}\s*\/\s*\d{1,2}\s*\/\s*\d{2,4}$/.test(trimmed)) continue;
     const value = evaluateArithmetic(expression);
-    if (value !== null) hints.push(`${expression.trim()} = ${String(value).replace('.', ',')}`);
+    if (value !== null) hints.push(`${trimmed} = ${String(value).replace('.', ',')}`);
   }
   return [...new Set(hints)];
 }

@@ -48,6 +48,11 @@ test('калькулятор офиса: точные значения, диап
   assert.deepEqual(arithmeticHints('2-3 варианта за 10-15 минут'), []);
   assert.deepEqual(arithmeticHints('3 напитка в 2026 году'), []);
   assert.deepEqual(arithmeticHints('1 / 3'), ['1 / 3 = 0,33']);
+  // Не выражения: телефон, дата, номер, версия, время.
+  for (const text of ['позвони +7 900 123-45-67', 'встреча 18/10/2026', 'ИНН 7701-123456', 'версия 1.2.3', 'к 15:30', 'дата 18.10.2026']) {
+    assert.deepEqual(arithmeticHints(text), [], text);
+  }
+  assert.deepEqual(arithmeticHints('выручка 30×3€ и 100 - 15 + 5'), ['30×3 = 90', '100 - 15 + 5 = 90']);
 });
 
 test('requestedCount: «3 напитка», «три идеи» — да; «30 × 3 €», «слоган» — нет', () => {
