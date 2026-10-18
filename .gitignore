@@ -48,3 +48,6 @@ Thumbs.db
 
 # Local tooling
 graphify-out/
+
+# Local task history (server/runs.mjs)
+data/

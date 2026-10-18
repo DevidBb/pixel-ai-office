@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { diag } from './llm.mjs';
+import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
@@ -57,7 +58,7 @@ function formatStats(stats) {
 }
 
 /** HTTP-сервер офиса. callModel(messages, opts) → { text, stats } передаётся снаружи, чтобы тесты могли подменить модель. */
-export function createApp({ config, callModel, limiter }) {
+export function createApp({ config, callModel, limiter, runs = new RunStore() }) {
   async function routeByModel(goal, signal) {
     const { text } = await callModel(routerMessages(goal), {
       json: true, maxTokens: config.routerMaxTokens, timeoutMs: config.routerTimeoutMs, signal, label: 'ceo-router'
@@ -91,37 +92,21 @@ export function createApp({ config, callModel, limiter }) {
     }
   }
 
-  async function runExecution(req, res, body) {
+  function validateGoal(body) {
     const goal = String(body.goal || '').trim();
-    if (!goal) return sendJson(res, 400, { error: 'Напиши цель или задачу для CEO.' });
-    if (goal.length > 5000) return sendJson(res, 400, { error: 'Слишком длинная задача: максимум 5000 символов.' });
+    if (!goal) return { error: 'Напиши цель или задачу для CEO.' };
+    if (goal.length > 5000) return { error: 'Слишком длинная задача: максимум 5000 символов.' };
     if (!config.apiKey && !config.isLocalUrl) {
-      return sendJson(res, 400, { error: 'Не настроен API-ключ. Скопируй .env.example в .env и укажи OPENAI_API_KEY. Ключ нужен серверу, не вставляй его в браузер.' });
+      return { error: 'Не настроен API-ключ. Скопируй .env.example в .env и укажи OPENAI_API_KEY. Ключ нужен серверу, не вставляй его в браузер.' };
     }
+    return { goal };
+  }
 
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache, no-transform',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no'
-    });
-    res.write(': Pixel AI Office stage 2\n\n');
-    const runId = Math.random().toString(36).slice(2, 8);
+  /** Выполнение задачи. Не знает, куда идут события: в SSE-ответ (/api/execute) или в журнал задачи (/api/runs). */
+  async function executeRun(goal, { emit: send, signal, runId }) {
     const runStarted = Date.now();
-    const controller = new AbortController();
-    const signal = controller.signal;
-    let finished = false;
-    // Комментарий-пинг держит SSE-соединение живым, пока модель долго считает на CPU.
-    const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15_000);
-    res.on('close', () => {
-      clearInterval(heartbeat);
-      if (!finished) {
-        diag(`[run ${runId}] клиент закрыл соединение — отменяю запросы к модели`);
-        controller.abort(new Error('client closed'));
-      }
-    });
     const cancelled = () => signal.aborted;
-    const safeEmit = (type, payload) => { if (!cancelled()) emit(res, type, payload); };
+    const safeEmit = (type, payload) => { if (!cancelled()) send(type, payload); };
     diag(`[run ${runId}] новая задача`, { chars: goal.length, concurrency: config.concurrency, router: config.routerMode });
 
     try {
@@ -229,22 +214,74 @@ export function createApp({ config, callModel, limiter }) {
           : `Итоговый отчёт готов. Результаты сдали: ${results.map(r => agentLabel(r.agentId)).join(', ')}.`,
         kind: failed.length ? 'warning' : 'success'
       });
-      finished = true;
       diag(`[run ${runId}] завершено за ${Math.round((Date.now() - runStarted) / 1000)} с`, { ok: results.length, failed: failed.length });
       safeEmit('done', {});
-      res.end();
     } catch (error) {
-      finished = true;
       if (!cancelled()) {
         const message = error?.message || 'Неизвестная ошибка выполнения.';
         diag(`[run ${runId}] ошибка`, { error: message });
-        safeEmit('error', { message });
+        // Статус — до error: в журнале задачи error завершает приём событий.
         safeEmit('agent-status', { agentId: 'ceo', status: 'error', task: 'Задача остановлена' });
-        res.end();
+        safeEmit('error', { message });
       }
-    } finally {
-      clearInterval(heartbeat);
     }
+  }
+
+  function openSse(res) {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no'
+    });
+    res.write(': Pixel AI Office\n\n');
+    // Комментарий-пинг держит SSE-соединение живым, пока модель долго считает на CPU.
+    const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15_000);
+    res.on('close', () => clearInterval(heartbeat));
+  }
+
+  // Прежний режим: задача живёт, пока открыто соединение; закрытие отменяет запросы к модели.
+  async function runExecution(req, res, body) {
+    const { goal, error } = validateGoal(body);
+    if (error) return sendJson(res, 400, { error });
+    openSse(res);
+    const runId = Math.random().toString(36).slice(2, 8);
+    const controller = new AbortController();
+    let finished = false;
+    res.on('close', () => {
+      if (!finished) {
+        diag(`[run ${runId}] клиент закрыл соединение — отменяю запросы к модели`);
+        controller.abort(new Error('client closed'));
+      }
+    });
+    await executeRun(goal, { emit: (type, payload) => emit(res, type, payload), signal: controller.signal, runId });
+    finished = true;
+    if (!res.writableEnded && !controller.signal.aborted) res.end();
+  }
+
+  // Задача на сервере: не зависит от вкладки, переживает перезагрузку страницы, сохраняется на диск.
+  function startRun(res, body) {
+    const { goal, error } = validateGoal(body);
+    if (error) return sendJson(res, 400, { error });
+    const run = runs.create(goal);
+    executeRun(goal, { emit: (type, payload) => runs.emit(run, type, payload), signal: run.controller.signal, runId: run.id })
+      .catch(err => diag(`[run ${run.id}] непредвиденная ошибка`, { error: err?.message }))
+      .finally(() => {
+        if (run.status === 'running') runs.emit(run, 'error', { message: 'Задача завершилась без итогового события. Подробности — в логах сервера.' });
+      });
+    return sendJson(res, 202, { runId: run.id });
+  }
+
+  // События задачи: сначала всё после seq `after` (или Last-Event-ID), затем новые. Закрытие вкладки задачу не отменяет.
+  function streamRun(req, res, run, url) {
+    const after = Number(url.searchParams.get('after') ?? req.headers['last-event-id'] ?? 0) || 0;
+    openSse(res);
+    const unsubscribe = runs.subscribe(run, after, event => {
+      if (res.writableEnded) return;
+      if (event === null) return res.end();
+      res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
+    });
+    res.on('close', unsubscribe);
   }
 
   async function checkModel() {
@@ -280,6 +317,30 @@ export function createApp({ config, callModel, limiter }) {
           res.end();
         }
         return;
+      }
+    }
+    const url = new URL(req.url || '/', 'http://localhost');
+    if (url.pathname === '/api/runs') {
+      if (req.method === 'GET') return sendJson(res, 200, { runs: runs.list() });
+      if (req.method === 'POST') {
+        try { return startRun(res, await readBody(req)); }
+        catch (error) { return sendJson(res, 400, { error: error.message || 'Не удалось прочитать запрос.' }); }
+      }
+    }
+    const runRoute = url.pathname.match(/^\/api\/runs\/([\w-]+)(\/events|\/cancel)?$/);
+    if (runRoute) {
+      const run = runs.get(runRoute[1]);
+      if (!run) return sendJson(res, 404, { error: 'Задача не найдена на сервере. Возможно, она старше последних 50 задач.' });
+      const [, , action] = runRoute;
+      if (req.method === 'GET' && action === '/events') return streamRun(req, res, run, url);
+      if (req.method === 'POST' && action === '/cancel') {
+        const cancelled = runs.cancel(run);
+        if (cancelled) diag(`[run ${run.id}] остановлено пользователем`);
+        return sendJson(res, 200, { status: run.status, cancelled });
+      }
+      if (req.method === 'GET' && !action) {
+        const { id, goal, status, createdAt, updatedAt, events } = run;
+        return sendJson(res, 200, { id, goal, status, createdAt, updatedAt, events });
       }
     }
     if (req.url?.startsWith('/api/')) return sendJson(res, 404, { error: 'Неизвестный API-маршрут.' });
