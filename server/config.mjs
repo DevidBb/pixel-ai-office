@@ -37,6 +37,8 @@ export function readConfig(env = process.env) {
   const temperature = Number(env.LLM_TEMPERATURE);
   return {
     port: Number(env.PORT || 8787),
+    // Разрешить страницы офиса, открытые с адресов локальной сети (npm run dev:lan). По умолчанию — только этот компьютер.
+    allowLan: envBool(env, 'OFFICE_ALLOW_LAN', false),
     // Задачи и их результаты (data/runs/*.json). Папка в .gitignore.
     dataDir: env.DATA_DIR || resolve(rootDir, 'data'),
     model: env.OPENAI_MODEL || 'gpt-4.1-mini',
