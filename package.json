@@ -11,7 +11,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "start:api": "node server.mjs",
-    "check": "node --check server.mjs && node --check server/config.mjs && node --check server/llm.mjs && node --check server/office.mjs && node --check server/app.mjs && node --check server/runs.mjs",
+    "check": "node --check server.mjs && node --check server/config.mjs && node --check server/llm.mjs && node --check server/office.mjs && node --check server/app.mjs && node --check server/runs.mjs && node --check src/taskEvents.ts",
     "test": "node --test \"test/*.test.mjs\"",
     "bench:model": "node scripts/bench-model.mjs"
   },

@@ -123,3 +123,9 @@
   .mini-status { font-size: .62rem; }
   .prompt-meta { align-items: flex-start; }
 }
+
+.task-actions { display: flex; gap: 6px; margin: 6px 0 2px; }
+.task-actions button { font: inherit; font-size: .72rem; padding: 3px 9px; border-radius: 6px; border: 1px solid rgba(80, 88, 91, .35); background: transparent; color: inherit; cursor: pointer; }
+.task-actions button:hover:not(:disabled) { background: rgba(132, 142, 130, .14); }
+.task-actions button:disabled { opacity: .45; cursor: default; }
+.task-actions button:focus-visible { outline: 2px solid #5b8fa8; outline-offset: 1px; }

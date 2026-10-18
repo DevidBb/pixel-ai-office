@@ -143,6 +143,16 @@ export class RunStore {
     }
   }
 
+  /** Удалить завершённую задачу из истории (память и диск). Идущую задачу сначала нужно остановить. */
+  remove(run) {
+    if (!FINISHED.has(run.status)) return false;
+    this.runs.delete(run.id);
+    if (this.dir) {
+      try { unlinkSync(join(this.dir, `${run.id}.json`)); } catch { /* уже удалён */ }
+    }
+    return true;
+  }
+
   /** Сохранить всё перед остановкой сервера. */
   flush() {
     for (const run of this.runs.values()) if (run.timer) this.persistNow(run);
