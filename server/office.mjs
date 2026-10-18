@@ -74,6 +74,14 @@ const FRAGMENT_SPLIT = /[,.;:!?\n—–]|(?<!\p{L})(?:и|а|но|или|либо
 const POLITE_INSERT = new RegExp(POLITE, 'giu');
 const fragmentBefore = (goal, start) => goal.slice(0, start).replace(POLITE_INSERT, ' ').split(FRAGMENT_SPLIT).at(-1);
 const fragmentAfter = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ').split(FRAGMENT_SPLIT)[0];
+// Перед фрагментом двоеточие или открытая кавычка: «Luma 4, переведи на английский: подключи всю команду» — цитата,
+// а не поручение офису.
+const FRAGMENT_DELIMITERS = new RegExp(FRAGMENT_SPLIT.source, 'giu');
+function quotedFragment(goal, start) {
+  const head = goal.slice(0, start).replace(POLITE_INSERT, ' ');
+  const count = pattern => (head.match(pattern) || []).length;
+  return (head.match(FRAGMENT_DELIMITERS) || []).at(-1) === ':' || count(/«/g) > count(/»/g) || count(/["“”]/g) % 2 === 1;
+}
 // Фрагмент — вопрос («Разве всех подключать не нужно?»): риторика, а не отказ.
 const fragmentIsQuestion = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ').match(FRAGMENT_SPLIT)?.[0] === '?';
 
@@ -256,12 +264,14 @@ export function wantsWholeTeam(goal) {
     const after = fragmentAfter(goal, match.index + match[0].length);
     const form = match[0].match(/^\p{L}+/u)[0].toLowerCase();
     if (form === 'всю') {
-      return CALL_BEFORE.test(before) && EMPTY_OR_EXCEPTION.test(after) && !FRAGMENT_NEGATION.test(`${before} ${after}`.replace(NOT_A_REFUSAL, ' '));
+      return CALL_BEFORE.test(before) && EMPTY_OR_EXCEPTION.test(after) && !quotedFragment(goal, match.index) &&
+        !FRAGMENT_NEGATION.test(`${before} ${after}`.replace(NOT_A_REFUSAL, ' '));
     }
     // «всем», «всеми», «всей» не бывают объектом отказа («Всем пятерым не нужен отчёт» — про отчёт).
     if ((form !== 'все' && form !== 'всех') || PREPOSITION_BEFORE.test(before)) return true;
     if (fragmentIsQuestion(goal, match.index + match[0].length)) return true;
-    return !(REFUSAL_BEFORE.test(before) && NOTHING_AFTER_REFUSAL.test(after)) && !REFUSAL_AFTER.test(after);
+    // Отказ после слова — только когда «все/всех» начинает фрагмент: «Исключать всех специалистов не стоит» — просьба.
+    return !(REFUSAL_BEFORE.test(before) && NOTHING_AFTER_REFUSAL.test(after)) && !(!before.trim() && REFUSAL_AFTER.test(after));
   }));
 }
 
