@@ -124,11 +124,12 @@
   .prompt-meta { align-items: flex-start; }
 }
 
-.task-actions { display: flex; gap: 6px; margin: 6px 0 2px; }
+.task-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 2px; }
 .task-actions button { font: inherit; font-size: .72rem; padding: 3px 9px; border-radius: 6px; border: 1px solid rgba(80, 88, 91, .35); background: transparent; color: inherit; cursor: pointer; }
 .task-actions button:hover:not(:disabled) { background: rgba(132, 142, 130, .14); }
 .task-actions button:disabled { opacity: .45; cursor: default; }
 .task-actions button:focus-visible { outline: 2px solid #5b8fa8; outline-offset: 1px; }
+.task-actions .export-note { flex-basis: 100%; font-size: .72rem; color: #9a5b2c; }
 
 .scene-frame { position: relative; }
 .scene-placeholder { position: absolute; inset: 10px; display: grid; place-items: center; padding: 16px; text-align: center; border-radius: 4px; background: #c9c6ba; color: #4c4f4a; font: 12px 'DM Mono', monospace; }
