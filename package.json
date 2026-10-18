@@ -11,10 +11,11 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "start:api": "node server.mjs",
-    "check": "node --check server.mjs && node --check server/config.mjs && node --check server/llm.mjs && node --check server/office.mjs && node --check server/app.mjs && node --check server/runs.mjs && node --check src/taskEvents.ts",
+    "check": "node --check server.mjs && node --check server/config.mjs && node --check server/llm.mjs && node --check server/office.mjs && node --check server/app.mjs && node --check server/runs.mjs && node --check src/taskEvents.ts && node --check server/eval.mjs",
     "test": "node --test \"test/*.test.mjs\"",
     "bench:model": "node scripts/bench-model.mjs",
-    "dev:lan": "concurrently -k -n api,web \"OFFICE_ALLOW_LAN=true node server.mjs\" \"OFFICE_HOST=0.0.0.0 vite\""
+    "dev:lan": "concurrently -k -n api,web \"OFFICE_ALLOW_LAN=true node server.mjs\" \"OFFICE_HOST=0.0.0.0 vite\"",
+    "eval:coffee": "node scripts/eval-coffee.mjs"
   },
   "dependencies": {
     "phaser": "^3.90.0",

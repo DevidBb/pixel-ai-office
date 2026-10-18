@@ -349,15 +349,75 @@ export function contextForAgent(context) {
   return sentences.join(' ').trim();
 }
 
+// Калькулятор офиса: точные значения арифметики из задания. Маленькая модель ошибается в счёте,
+// поэтому сервер считает сам и подсказывает ответ («30 × 3 = 90»).
+const ARITHMETIC = /\d+(?:[.,]\d+)?(?:\s*[×x*·/+\-−]\s*\d+(?:[.,]\d+)?)+/gu;
+
+function evaluateArithmetic(expression) {
+  const tokens = expression.replace(/[×x*·]/g, '*').replace(/−/g, '-').match(/\d+(?:[.,]\d+)?|[*/+-]/g);
+  if (!tokens) return null;
+  const values = [];
+  const ops = [];
+  const apply = () => {
+    const b = values.pop();
+    const a = values.pop();
+    const op = ops.pop();
+    values.push(op === '*' ? a * b : op === '/' ? a / b : op === '+' ? a + b : a - b);
+  };
+  const rank = op => (op === '*' || op === '/' ? 2 : 1);
+  for (const token of tokens) {
+    if (/\d/.test(token)) { values.push(Number(token.replace(',', '.'))); continue; }
+    while (ops.length && rank(ops.at(-1)) >= rank(token)) apply();
+    ops.push(token);
+  }
+  while (ops.length) apply();
+  const [result] = values;
+  return Number.isFinite(result) ? Math.round(result * 100) / 100 : null;
+}
+
+/** «выручка 30 × 3 €» → ['30 × 3 = 90']. Одиночные числа и даты не трогает. */
+export function arithmeticHints(text) {
+  const hints = [];
+  for (const [expression] of text.matchAll(ARITHMETIC)) {
+    if (/^\d+\s*-\s*\d+$/.test(expression.trim())) continue; // «2-3 варианта», «10-15 минут» — диапазон, а не вычитание
+    const value = evaluateArithmetic(expression);
+    if (value !== null) hints.push(`${expression.trim()} = ${String(value).replace('.', ',')}`);
+  }
+  return [...new Set(hints)];
+}
+
+const NUMBER_WORDS = { два: 2, две: 2, три: 3, четыре: 4, пять: 5, шесть: 6, семь: 7, восемь: 8, девять: 9, десять: 10 };
+
+/** «3 напитка», «2 способа привлечения», «три идеи» → 3 / 2 / 3; иначе null. */
+export function requestedCount(objective) {
+  const match = objective.trim().match(/^(\d+|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+(?!(?:[×x*]|€|\$|руб|р\.|%|раз))\p{L}/iu);
+  if (!match) return null;
+  const n = /^\d+$/.test(match[1]) ? Number(match[1]) : NUMBER_WORDS[match[1].toLowerCase()];
+  return n >= 2 && n <= 10 ? n : null;
+}
+
 // Подсказка намеренно короткая и без имён коллег: на CPU каждый токен подсказки стоит ~45 мс,
 // а перечисленные имена модель повторяет в ответе.
+// Для адресного задания описание роли не передаётся: маленькая модель заполняет его как шаблон
+// («Предложение / Цена-гипотеза / Критерии» вместо трёх напитков, «затраты и маржа», когда просили выручку).
 export function agentMessages(agent, task, plan) {
-  const system = `Ты ${agent.name}, ${agent.role} в Pixel AI Office. ${agent.focus} Отвечай на русском, конкретно и честно. Не выдумывай ссылки, клиентов, контакты и продажи. Пиши только свой результат: не упоминай других сотрудников и не пиши за них.`;
+  const base = `Ты ${agent.name}, ${agent.role} в Pixel AI Office. Отвечай на русском, конкретно и честно. Не выдумывай ссылки, клиентов, контакты и продажи. Пиши только свой результат: не упоминай других сотрудников и не пиши за них.`;
+  const system = task.assigned
+    ? `${base} Выполняй ровно то, что сказано в задании: не добавляй разделы, цифры и расчёты, о которых не просили.`
+    : `Ты ${agent.name}, ${agent.role} в Pixel AI Office. ${agent.focus} ${base.slice(base.indexOf('Отвечай'))}`;
   const shared = plan.tasks.length > 1 ? ' Другие части цели делают коллеги — пиши только по своей роли.' : '';
   const context = task.assigned ? contextForAgent(task.context) : '';
   const one = task.exactlyOne ? ' Нужен ровно один вариант — дай один, без списка альтернатив.' : '';
+  const count = task.assigned ? requestedCount(task.objective) : null;
+  // «3 напитка» → что именно перечислять: «напитка»; пункт — само название, а не совет и не пометка.
+  const what = count ? task.objective.trim().replace(/^\S+\s+/u, '') : '';
+  const shape = count
+    ? ` Ответ — нумерованный список ровно из ${count} пунктов (1. … ${count}. …). Каждый пункт начинается с конкретного названия (что перечислить: «${what}»), затем короткое пояснение. Не пиши советов вместо вариантов. Допущения — одной строкой после списка, не пунктом списка.`
+    : '';
+  const math = arithmeticHints(task.objective);
+  const calc = math.length ? `\nКАЛЬКУЛЯТОР ОФИСА (посчитано точно, используй эти значения и покажи расчёт): ${math.join('; ')}\n` : '';
   const user = task.assigned
-    ? `${context ? `КОНТЕКСТ:\n${context}\n\n` : ''}ТВОЁ ЗАДАНИЕ:\n${task.objective}\n\nДай только готовый результат по этому заданию, коротко.${one} Допущения помечай словом «допущение».`
+    ? `${context ? `КОНТЕКСТ:\n${context}\n\n` : ''}ТВОЁ ЗАДАНИЕ:\n${task.objective}\n${calc}\nДай только готовый результат по этому заданию, коротко.${shape}${one} Допущения помечай словом «допущение».`
     : `ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n${task.context}\n\nТВОЯ ЗАДАЧА:\n${task.objective}${shared}\n\nДай готовый практический результат (не план намерений). Будь кратким: заголовки и короткие списки.${one} Допущения помечай словом «допущение».`;
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
