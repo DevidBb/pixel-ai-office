@@ -94,12 +94,12 @@ function notForOffice(goal, start) {
   if (count(/«/g) > count(/»/g) || count(/["“”]/g) % 2 === 1) return true;
   const sentence = head.slice(head.search(SENTENCE_START) + 1);
   if (ADDRESSED_AGENT.test(sentence) || ROLE_ADDRESS.test(sentence)) return true;
+  // Любое двоеточие или тире после поручения в этом предложении — дальше материал, даже через запятые
+  // («Текст: привет, позови всю команду»).
   const pieces = sentence.split(FRAGMENT_SPLIT);
   const delimiters = sentence.match(FRAGMENT_DELIMITERS) || [];
-  const quoteMark = delimiters.at(-1);
-  if (quoteMark !== ':' && quoteMark !== '—' && quoteMark !== '–') return false;
-  const label = pieces.at(-2) || '';
-  return !(LABEL.test(label) && !VERB_LIKE.test(label) && !CONTENT_LABEL.test(label));
+  return delimiters.some((mark, i) => [':', '—', '–'].includes(mark) &&
+    !(LABEL.test(pieces[i]) && !VERB_LIKE.test(pieces[i]) && !CONTENT_LABEL.test(pieces[i])));
 }
 // Фрагмент — вопрос («Разве всех подключать не нужно?»): риторика, а не отказ.
 const fragmentIsQuestion = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ').match(FRAGMENT_SPLIT)?.[0] === '?';
@@ -132,7 +132,7 @@ const REFUSAL_BEFORE = new RegExp(String.raw`^\s*(?:(?:мне|нам)\s+нужн
   String.raw`|(?:можно|можешь|можете|можем|давай|давайте|чтобы|лучше(?:\s+бы)?|хорошо\s+бы)\s+не(?:\s+будем)?\s+${CALL_INFINITIVE})\s+$`, 'iu');
 const NOTHING_AFTER_REFUSAL = /^\s*(?:нуж\p{L}*|требуются)?\s*$/iu;
 // «Не всех специалистов, а вообще весь офис подключи» — противопоставление снова про всех: не отказ.
-const CONTRAST_TO_ALL = /^\s*,?\s*а\s+(?:вообще\s+|лучше\s+|просто\s+)?(?:весь|всю|всех|все|вся|всем)(?!\p{L})/iu;
+const CONTRAST_TO_ALL = /^\s*,?\s*а\s+(?:[\p{L}-]+\s+){0,2}?(?:весь|всю|всех|все|вся|всем)(?!\p{L})/iu;
 // «Всех специалистов подключать не надо», «Все специалисты не нужны», «Всех лучше не звать». «Исключать не нужно» — не отказ.
 const REFUSAL_AFTER = new RegExp(String.raw`^(?:\s+лучше)?(?:\s+${CALL_INFINITIVE})?\s+не\s+(?:${REFUSE_VERB}|${CALL_INFINITIVE}|надо|нужно|стоит|требуется|нуж(?:ен|на|ны))\s*$`, 'iu');
 const ADDRESS_TO_ALL = new RegExp(String.raw`^\s+не\s+${REFUSE_VERB}\s*$`, 'iu');
