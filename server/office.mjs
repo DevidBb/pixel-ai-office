@@ -565,19 +565,43 @@ function clipLines(text, max) {
 }
 
 /**
- * Результаты коллег для подсказки: без <think>, обрезанные, с общим лимитом.
+ * Результаты коллег для подсказки: суть (handoffDigest), обрезанная, с общим лимитом.
  * outcomes — [{ agentId, result }] в порядке важности. Пустые и неудачные пропускаются.
  */
 // Пометка «допущение» отдельной строкой — оговорка автора, а не данные: маленькая модель переписывала её к себе дословно.
 const ASSUMPTION_LINE = /^\s*(?:(?:[-*•–]|\d+[.)])\s+)?[*_\s]*допущени/iu;
+
+const DIGEST_LINE_CHARS = 60;
+// Ярлык перед двоеточием («Способ привлечения:», «Группа 1:») — не содержание пункта.
+const DIGEST_LABEL = /^[^:]{1,30}:\s+(?=\S)/u;
+const DIGEST_NUMBER = /\d+(?:[.,]\d+)?(?:[–-]\d+)?(?:\s*(?:€|₽|\$|%|[\p{L}]+))?/gu;
+
+/**
+ * Суть результата коллеги: по строке на пункт — заголовок до тире и цифры из пояснения.
+ * Готовые строки маленькая модель переписывала к себе почти дословно; заголовков и цифр хватает, чтобы строить работу на них,
+ * а подсказка короче (на CPU каждый токен ~45 мс).
+ */
+export function handoffDigest(text) {
+  return stripThink(text).split(/\r?\n/).map(line => line.replace(/^\s*(?:(?:[-*•–]|\d+[.)])\s+)?/u, '').replace(/[*_#`]+/g, '').trim())
+    .filter(line => line && !ASSUMPTION_LINE.test(line) && !/:$/.test(line))
+    .map(line => {
+      if (line.length <= DIGEST_LINE_CHARS) return line;
+      const body = line.replace(DIGEST_LABEL, '');
+      const dash = body.search(/\s[—–-]\s/u);
+      const head = dash > 0 ? body.slice(0, dash) : body.split(/[,.;]\s/u)[0];
+      const numbers = (dash > 0 ? body.slice(dash) : body.slice(head.length)).match(DIGEST_NUMBER) || [];
+      const short = head.length <= DIGEST_LINE_CHARS ? head : `${head.slice(0, DIGEST_LINE_CHARS).replace(/\s+\S*$/u, '')}…`;
+      return numbers.length ? `${short} (${numbers.slice(0, 3).join(', ')})` : short;
+    })
+    .map(line => `- ${line}`).join('\n');
+}
 
 export function compactHandoffs(outcomes, { perSource = HANDOFF_SOURCE_CHARS, total = HANDOFF_TOTAL_CHARS } = {}) {
   const handoffs = [];
   let left = total;
   for (const outcome of outcomes) {
     // Маркеры подсказки в чужом тексте не должны выглядеть как новое задание.
-    const text = stripThink(outcome?.result).split(/\r?\n/).filter(line => !ASSUMPTION_LINE.test(line)).join('\n').trim()
-      .replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
+    const text = handoffDigest(outcome?.result).replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
     if (!text || left < 80) continue;
     const clipped = clipLines(text, Math.min(perSource, left));
     handoffs.push({ agentId: outcome.agentId, text: clipped });
@@ -625,6 +649,10 @@ export function chatMessages(agent, ownResult, partner, incoming) {
   ];
 }
 
+// «Luma 2, исследователь рынка: …», «Luma 6 · Финансовый аналитик, …» — ярлык роли после имени адресата
+// (модель копирует его из подсказки) не нужен: в чате обращаются по имени.
+const ADDRESS_ROLE = /^\s*((?:luma|люма)\s*[1-6])(?!\d)\s*[,·:—–-]?\s*(?:исследовател\p{L}*(?:\s+рынка)?|продуктолог\p{L}*|креатор\p{L}*|менеджер\p{L}*\s+(?:по\s+)?продаж\p{L}*|финансов\p{L}*\s+аналитик\p{L}*)\s*[,:—–-]\s*/iu;
+
 // Временная замена точки в числе: символ из области для частного использования, в ответах модели его нет.
 const DECIMAL_DOT = '\uE000';
 
@@ -648,6 +676,7 @@ export function cleanChatReply(text, speakerId, participantIds = [], { truncated
   const signature = speaker ? new RegExp(String.raw`^\s*(?:\*\*)?(?:luma|люма)\s*${speaker.name.slice(-1)}(?!\d)[^:\n]{0,40}?(?:\*\*)?\s*:\s*`, 'iu') : /$^/;
   let reply = stripThink(text)
     .replace(signature, '')
+    .replace(ADDRESS_ROLE, '$1, ')
     .replace(/\s+/g, ' ')
     .replace(/^["«“'\s]+|["»”'\s]+$/gu, '')
     .trim();

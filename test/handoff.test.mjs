@@ -5,7 +5,7 @@ import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import {
   AGENTS, routeByRules, buildPlan, agentMessages, foreignAttributions, attributionBlock,
-  handoffEnabled, handoffGraph, compactHandoffs, handoffBlock, HANDOFF_SOURCE_CHARS, HANDOFF_TOTAL_CHARS
+  handoffEnabled, handoffGraph, compactHandoffs, handoffBlock, handoffDigest, HANDOFF_SOURCE_CHARS, HANDOFF_TOTAL_CHARS
 } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS } from './fixtures.mjs';
 
@@ -70,13 +70,25 @@ test('compactHandoffs: без <think>, обрезка по источнику и
   assert.deepEqual(handoffs.map(h => h.agentId), ['research', 'product']);
   assert.ok(handoffs.every(h => h.text.length <= HANDOFF_SOURCE_CHARS && h.text.endsWith('…')));
   assert.ok(handoffs.reduce((sum, h) => sum + h.text.length, 0) <= HANDOFF_TOTAL_CHARS);
-  assert.ok(!handoffs[0].text.includes('think') && handoffs[0].text.startsWith('1. Сегмент номер 1\n'));
+  assert.ok(!handoffs[0].text.includes('think') && handoffs[0].text.startsWith('- Сегмент номер 1\n'));
   assert.ok(!/ТВОЁ ЗАДАНИЕ/.test(handoffs[1].text), 'чужой текст не выглядит как новое задание');
+});
+
+test('handoffDigest: коллеге — заголовки пунктов и цифры, а не готовые строки для переписывания', () => {
+  const research = '**3 группы клиентов:**\n1. Группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену.\n2. **Преподаватели** – приходят днём, 2–3 раза в неделю, средний чек 4 €.\n\nдопущение: данные основаны на общем поведении.';
+  assert.equal(handoffDigest(research), '- Группа студентов\n- Преподаватели (2–3 раза, 4 €)');
+  // Короткая строка целиком; ярлык «Способ привлечения:» — не содержание.
+  assert.equal(handoffDigest('Выручка: 30 × 3 € = 90 €.\n1. Способ привлечения: Листовки у входа в университет, 500 штук в первую неделю за 20 €.'),
+    '- Выручка: 30 × 3 € = 90 €.\n- Листовки у входа в университет (500 штук, 20 €)');
+  // Длинный заголовок без разделителя обрезается по слову.
+  const long = handoffDigest('Очень длинное описание напитка без всяких разделителей которое продолжается и продолжается дальше чем нужно для коллеги');
+  assert.ok(long.length <= 66 && long.endsWith('…'), long);
+  assert.equal(handoffDigest('<think>x</think>\n   \n'), '');
 });
 
 test('compactHandoffs: пометки «допущение» — оговорки автора, коллеге не передаются', () => {
   const [handoff] = compactHandoffs([{ agentId: 'research', result: '1. Студенты — утром.\n2. Преподаватели — днём.\n\nдопущение: данные основаны на общем поведении.\n- **Допущение:** 30 гостей в день.\n3. Соседи — вечером, допущение: живут рядом.' }]);
-  assert.equal(handoff.text, '1. Студенты — утром.\n2. Преподаватели — днём.\n\n3. Соседи — вечером, допущение: живут рядом.');
+  assert.equal(handoff.text, '- Студенты — утром.\n- Преподаватели — днём.\n- Соседи — вечером, допущение: живут рядом.');
   // Источник только из допущений — передавать нечего.
   assert.deepEqual(compactHandoffs([{ agentId: 'research', result: 'Допущение: спрос есть.' }]), []);
 });
@@ -176,7 +188,7 @@ test('HANDOFF=auto, ролевая задача: зависимые ждут и�
       assert.ok(model.calls.find(c => c.agentId === s).doneAt < call.calledAt, `${id} вызван до готовности ${s}`);
     }
   }
-  assert.match(userPrompt(model, 'sales'), /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 2 · Исследователь рынка\), используй как вход, не переписывай и не приписывай себе:\nСегменты: офисы IT-компаний, коворкинги\.\n\nДАННЫЕ ОТ КОЛЛЕГИ \(Luma 3 · Продуктолог\)[^\n]*\nОТВЕТ product: общая задача\n\nСделай свою часть своими словами[^\n]*\n\nТВОЯ ЗАДАЧА:/);
+  assert.match(userPrompt(model, 'sales'), /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 2 · Исследователь рынка\), используй как вход, не переписывай и не приписывай себе:\n- Сегменты: офисы IT-компаний, коворкинги\.\n\nДАННЫЕ ОТ КОЛЛЕГИ \(Luma 3 · Продуктолог\)[^\n]*\n- ОТВЕТ product: общая задача\n\nСделай свою часть своими словами[^\n]*\n\nТВОЯ ЗАДАЧА:/);
   assert.ok(!userPrompt(model, 'research').includes('ДАННЫЕ ОТ КОЛЛЕГИ'), 'у исследователя источников нет');
   // Журнал: кто чьи данные получил; в результате — список источников.
   const logs = ofType(events, 'log').map(e => e.message);
@@ -215,7 +227,7 @@ test('HANDOFF=true, кофейня: финансист получает данн
   const model = mockModel();
   const events = await execute(COFFEE_GOAL, model, { HANDOFF: 'true' });
   const finance = userPrompt(model, 'finance');
-  assert.match(finance, /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 3 · Продуктолог\)[^\n]*\nОТВЕТ product: 3 напитка\n/);
+  assert.match(finance, /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 3 · Продуктолог\)[^\n]*\n- ОТВЕТ product: 3 напитка\n/);
   assert.match(finance, /ТВОЁ ЗАДАНИЕ:\nвыручка 30 × 3 €\n/);
   assert.match(finance, /30 × 3 = 90/);
   assert.equal(ofType(events, 'agent-result').find(e => e.agentId === 'finance').result, 'ОТВЕТ finance: выручка 30 × 3 €');

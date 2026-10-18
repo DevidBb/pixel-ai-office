@@ -224,5 +224,8 @@ test('scoreTeamRun: повторы в результатах считаются 
   // Креатор данных не получал: совпадение с исследованием — не handoff-повтор.
   assert.equal(report.agents.find(a => a.agentId === 'creator').copiedLines, 0);
   assert.deepEqual(report.chat.map(c => [c.agentId, c.echo]), [['product', true], ['research', false]]);
+  // Повтор уже сказанной в чате реплики — тоже пересказ.
+  const repeated = scoreTeamRun([...events, { type: 'agent-chat', agentId: 'creator', text: 'Luma 3, сколько стоит латте на овсяном и берут ли его вечером?', at: 7000 }]);
+  assert.equal(repeated.chat.at(-1).echo, true);
   assert.deepEqual([report.copiedLines, report.copiedAssumptions, report.chatEchoes, report.chatReplies], [2, 1, 1, 2]);
 });

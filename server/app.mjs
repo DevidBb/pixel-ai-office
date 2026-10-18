@@ -336,7 +336,8 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         if (signal.aborted) return;
         reply = cleanChatReply(text, agent.id, participants, {
           truncated: stats?.doneReason === 'length',
-          sources: results.filter(r => r.agentId !== agent.id).map(r => r.result)
+          // Пересказ результата коллеги или уже сказанной реплики — ничего нового.
+          sources: [...results.filter(r => r.agentId !== agent.id).map(r => r.result), ...said.map(message => message.text)]
         });
         if (!reply) diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая, заглушка или пересказ`, { text: String(text || '').slice(0, 80) });
         else said.push({ agentId: agent.id, ...reply });

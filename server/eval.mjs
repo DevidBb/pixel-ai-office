@@ -153,8 +153,10 @@ export function scoreTeamRun(events) {
     const handoffFrom = e.handoffFrom || [];
     return { agentId: e.agentId, handoffFrom, ...echo(e.result, handoffFrom.map(resultOf)) };
   });
-  const chat = events.filter(e => e.type === 'agent-chat').map(e => {
-    const { share } = echo(e.text, results.filter(r => r.agentId !== e.agentId).map(r => r.result));
+  const chatEvents = events.filter(e => e.type === 'agent-chat');
+  // Пересказ — против результатов коллег и уже сказанных реплик.
+  const chat = chatEvents.map((e, i) => {
+    const { share } = echo(e.text, [...results.filter(r => r.agentId !== e.agentId).map(r => r.result), ...chatEvents.slice(0, i).map(c => c.text)]);
     return { agentId: e.agentId, to: e.to, text: e.text, share, echo: share >= ECHO_LINE_SHARE };
   });
   const first = events[0]?.at;
