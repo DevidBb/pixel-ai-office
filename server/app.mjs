@@ -9,6 +9,42 @@ import {
 
 const DELTA_INTERVAL_MS = 300;
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+// 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, *.local
+const LAN_HOST = /^(?:10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|[\w-]+\.local)$/i;
+
+function hostnameOf(value) {
+  try { return new URL(value.includes('://') ? value : `http://${value}`).hostname; } catch { return null; }
+}
+
+/**
+ * Защита от чужих сайтов, открытых в том же браузере.
+ * - Host должен быть localhost: иначе это DNS rebinding (чужой домен, указывающий на 127.0.0.1).
+ * - Изменяющие запросы (POST/DELETE) с заголовком Origin принимаются только со страниц офиса.
+ *   Браузер всегда шлёт Origin в кросс-сайтовых POST, а «простой» POST с text/plain проходит без CORS-проверки.
+ * - Тело POST — только application/json: такой запрос с чужого сайта браузер сначала проверяет через CORS.
+ */
+function rejectUntrusted(req, config) {
+  const host = hostnameOf(req.headers.host || '');
+  if (!host || !LOCAL_HOSTS.has(host)) return [421, 'Запрос к API должен идти на localhost.'];
+  // Fetch Metadata: браузер сам помечает запросы с чужих сайтов — даже GET без Origin
+  // (<img src>, <script src>, переход по ссылке). Страница офиса через прокси Vite даёт same-origin.
+  if (req.headers['sec-fetch-site'] === 'cross-site') return [403, 'Запрос с чужого сайта отклонён. Офис принимает задачи только со своей страницы.'];
+  if (req.method === 'GET' || req.method === 'HEAD') return null;
+  const origin = req.headers.origin;
+  if (origin) {
+    const originHost = hostnameOf(origin);
+    const trusted = originHost && (LOCAL_HOSTS.has(originHost) || (config.allowLan && LAN_HOST.test(originHost)));
+    if (!trusted) return [403, 'Запрос с чужого сайта отклонён. Офис принимает задачи только со своей страницы.'];
+  }
+  const length = Number(req.headers['content-length'] || 0);
+  const type = String(req.headers['content-type'] || '').toLowerCase();
+  if (req.method === 'POST' && (length > 0 || req.headers['transfer-encoding']) && !type.startsWith('application/json')) {
+    return [415, 'Тело запроса должно быть JSON (content-type: application/json).'];
+  }
+  return null;
+}
+
 function sendJson(res, status, value) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(value));
@@ -311,6 +347,11 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
   }
 
   return http.createServer(async (req, res) => {
+    const rejected = rejectUntrusted(req, config);
+    if (rejected) {
+      diag('отклонён запрос', { method: req.method, url: req.url, origin: req.headers.origin, host: req.headers.host, status: rejected[0] });
+      return sendJson(res, rejected[0], { error: rejected[1] });
+    }
     if (req.method === 'GET' && req.url === '/api/health') {
       return sendJson(res, 200, {
         ok: true, configured: Boolean(config.apiKey) || config.isLocalUrl, model: config.model, provider: config.provider,
@@ -319,8 +360,12 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens
       });
     }
-    if (req.method === 'GET' && req.url === '/api/health/model') {
-      return sendJson(res, 200, { model: config.model, provider: config.provider, think: config.ollamaThink, ...(await checkModel()) });
+    // Проверка модели вызывает модель (занимает очередь, у платного API стоит денег), поэтому только POST:
+    // его с чужого сайта отсекает проверка Origin выше. GET здесь — только подсказка.
+    if (req.url === '/api/health/model') {
+      if (req.method === 'POST') return sendJson(res, 200, { model: config.model, provider: config.provider, think: config.ollamaThink, ...(await checkModel()) });
+      res.setHeader('allow', 'POST');
+      return sendJson(res, 405, { error: 'Проверка модели вызывает модель — используй POST: curl -X POST http://127.0.0.1:8787/api/health/model' });
     }
     if (req.method === 'POST' && req.url === '/api/execute') {
       try {
