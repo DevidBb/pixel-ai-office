@@ -381,7 +381,8 @@ function evaluateArithmetic(expression) {
  *   период, дата, телефон, номер или диапазон («2025/2026», «2026-10-18», «8-800-555-35-35», «2-3»);
  * - выражение не может быть частью числа с точками или версии («1.2.3+4», «18.10.2026»);
  * - «-» в цепочке из одних «-» — диапазон, а не вычитание; дд/мм/гггг — дата;
- * - разделители тысяч («1 000») склеиваются до поиска выражений.
+ * - разделители тысяч («1 000») склеиваются до поиска выражений;
+ * - латинская «x» — умножение только с пробелами вокруг («10 x 3»), а «1920x1080» — размер.
  */
 export function arithmeticHints(input) {
   // «1 000 + 2 000», «10 000 * 3»: склеиваем разделители тысяч (пробел, неразрывный пробел), иначе выражение
@@ -395,6 +396,8 @@ export function arithmeticHints(input) {
     if (/[\d.,]/.test(before) || /^[.,]?\d/.test(after)) continue;
     const trimmed = expression.trim();
     if (/\d[/\-−]|[/\-−]\d/.test(trimmed)) continue;
+    // Латинская «x» без пробелов — размер или формат («1920x1080», «4x4»), а не умножение; «×» и «*» — всегда действие.
+    if (/\dx|x\d/i.test(trimmed)) continue;
     if (/^\d+(?:\s*[-−]\s*\d+)+$/.test(trimmed)) continue;
     if (/^\d{1,2}\s*\/\s*\d{1,2}\s*\/\s*\d{2,4}$/.test(trimmed)) continue;
     const value = evaluateArithmetic(expression);
@@ -419,6 +422,9 @@ const COUNT_PATTERN = new RegExp(
 export function requestedItems(objective) {
   const match = objective.trim().match(COUNT_PATTERN);
   if (!match) return null;
+  // «не предлагай 3 слогана, дай один» — число под отрицанием, это не просьба о трёх пунктах.
+  const lead = objective.trim().slice(0, match.index + match[0].indexOf(match[1]));
+  if (/(?<!\p{L})(?:не|без|кроме|вместо)(?!\p{L})/iu.test(lead)) return null;
   const count = /^\d+$/.test(match[1]) ? Number(match[1]) : NUMBER_WORDS[match[1].toLowerCase()];
   return count >= 2 && count <= 10 ? { count, what: match[2].trim() } : null;
 }

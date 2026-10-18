@@ -19,7 +19,7 @@ const LIST_MARKER = /^(\s*)(?:[-*•–]|\d+[.)])\s+(.*)$/u;
 export function countListItems(text) {
   const items = text.split(/\r?\n/).map(line => line.match(LIST_MARKER)).filter(Boolean)
     .map(([, indent, body]) => ({ indent: indent.replace(/\t/g, '    ').length, body: body.trim() }))
-    .filter(({ body }) => body && !/^[*_\s]*допущени/iu.test(body) && !/:\s*\**$/u.test(body));
+    .filter(({ body }) => body && !/^[*_\s]*допущени/iu.test(body));
   if (!items.length) return 0;
   const top = Math.min(...items.map(item => item.indent));
   return items.filter(item => item.indent === top).length;
@@ -55,10 +55,14 @@ const CHECKS = {
   finance: {
     label: 'выручка 30 × 3 € = 90 € без выдуманных цифр',
     check: text => {
-      // И 90, и лишние числа ищем во всём ответе: модель может пометить расчёт «допущением»
-      // или спрятать туда выдуманные затраты («Допущение: затраты 60 €»).
-      const has90 = /(?<![\d.,])90(?![\d.,])/.test(text);
-      const extra = [...new Set((text.match(/\d+(?:[.,]\d+)?/g) || []).map(n => Number(n.replace(',', '.'))).filter(n => ![30, 3, 90].includes(n)))];
+      // Ищем во всём ответе, включая «допущение» (туда модель может спрятать выдуманные затраты).
+      // 30 и 3 допустимы только в самом расчёте («30 × 3», «30 заказов × 3 €») и как «30 заказов»;
+      // «Затраты: 30 €» или «Маржа: 3 €» — выдуманные цифры. «90,00 €» — это 90.
+      const has90 = /(?<![\d.,])90(?:[.,]0+)?(?![\d.,]?\d)/.test(text);
+      const rest = text
+        .replace(/(?<![\d.,])30\s*(?:\p{L}+\s*)?[×xх*·]\s*3(?![\d.,]?\d)\s*€?/giu, ' ')
+        .replace(/(?<![\d.,])30\s+(?:заказ|клиент|покупател|продаж|чаш|напит|шт|человек|гост)\p{L}*/giu, ' ');
+      const extra = [...new Set((rest.match(/\d+(?:[.,]\d+)?/g) || []).map(n => Number(n.replace(',', '.'))).filter(n => n !== 90))];
       return { ok: has90 && extra.length === 0, detail: `${has90 ? '90 есть' : 'нет 90'}${extra.length ? `; лишние числа: ${extra.join(', ')}` : ''}` };
     }
   }

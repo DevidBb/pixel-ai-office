@@ -156,3 +156,28 @@ test('countListItems: вложенные пояснения не считают�
   assert.equal(countListItems('1. Студенты\n   - Нужна низкая цена\n   - Быстрое обслуживание\n2. Преподаватели\n3. Сотрудники'), 3);
   assert.equal(countListItems('- Капучино\n\t* с корицей\n- Чай\n- Лимонад'), 3);
 });
+
+// Ревью Codex (PR #9, четвёртый круг).
+test('калькулятор: «1920x1080» — размер, а «10 x 3» и «30×3» — умножение', () => {
+  for (const text of ['баннер 1920x1080 пикселей', 'плитка 4x4 см', 'формат 16X9']) assert.deepEqual(arithmeticHints(text), [], text);
+  assert.deepEqual(arithmeticHints('10 x 3 и 30×3'), ['10 x 3 = 30', '30×3 = 90']);
+});
+
+test('requestedItems: число под отрицанием — не количество', () => {
+  assert.equal(requestedItems('не предлагай 3 слогана, дай один слоган'), null);
+  assert.equal(requestedItems('вместо 5 идей дай одну'), null);
+  assert.equal(requestedItems('предложи 3 слогана').count, 3);
+});
+
+test('оценка финансиста: 30 и 3 вне расчёта — выдуманные цифры; 90,00 € засчитывается', () => {
+  const finance = text => scoreResults([{ agentId: 'finance', result: text }]).agents.find(a => a.agentId === 'finance');
+  assert.equal(finance('Выручка: 90 €. Затраты: 30 €. Маржа: 3 €.').ok, false);
+  assert.equal(finance('Выручка: 90,00 €').ok, true);
+  assert.equal(finance('Выручка: 30 × 3 € = 90 €').ok, true);
+  assert.equal(finance('Выручка: 90 € (30 заказов × 3 €). Допущение: 30 заказов.').ok, true);
+  assert.equal(finance('Выручка: 90 €. Допущение: затраты 60 € и маржа 30 €.').ok, false);
+});
+
+test('countListItems: пункт с двоеточием и вложенными пояснениями считается', () => {
+  assert.equal(countListItems('1. Студенты:\n   - ценят цену\n2. Преподаватели:\n   - ценят тишину\n3. Сотрудники:\n   - заходят утром'), 3);
+});
