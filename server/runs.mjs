@@ -68,7 +68,9 @@ export class RunStore {
   }
 
   push(run, type, payload = {}) {
-    const event = { seq: run.events.length + 1, at: Date.now(), type, ...payload };
+    // Номер — от последнего, а не от длины: после перезапуска черновиков (agent-delta) в журнале меньше,
+    // и по длине новые события получили бы уже занятые номера (переподключение с ?after их бы пропустило).
+    const event = { seq: (run.events.at(-1)?.seq || 0) + 1, at: Date.now(), type, ...payload };
     run.events.push(event);
     run.updatedAt = new Date(event.at).toISOString();
     for (const subscriber of run.subscribers) subscriber(event);
@@ -81,6 +83,8 @@ export class RunStore {
     this.push(run, type, payload);
     if (type === 'done') this.finish(run, 'done');
     else if (type === 'error') this.finish(run, 'error');
+    // Итог готов, а дальше может идти долгое обсуждение (CROSS_TALK): отчёт сразу на диск, а не через persistDelayMs.
+    else if (type === 'final') this.persistNow(run);
     else this.schedulePersist(run);
   }
 

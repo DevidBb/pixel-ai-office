@@ -318,6 +318,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
    */
   async function crossTalk(results, { safeEmit, signal, runId }) {
     const participants = results.map(r => r.agentId);
+    safeEmit('chat-start', {});
     safeEmit('log', { agentId: 'ceo', message: 'Команда коротко обсуждает результаты (CROSS_TALK).' });
     for (const own of results) {
       if (signal.aborted) return;

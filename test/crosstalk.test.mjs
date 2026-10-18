@@ -19,6 +19,12 @@ test('cleanChatReply: заглушки «OK», пустота и <think> отф�
     assert.equal(cleanChatReply(stub, 'sales', ALL), null, JSON.stringify(stub));
   }
   assert.equal(cleanChatReply(undefined, 'sales', ALL), null);
+  // Обращение по имени (его требует подсказка) не делает заглушку репликой.
+  for (const stub of ['Luma 3, согласен.', 'Luma 2, нет замечаний.', 'Luma 2: OK!', 'Luma 6 — спасибо', 'Люма 4, хорошо', 'Luma 2, OK, согласен.']) {
+    assert.equal(cleanChatReply(stub, 'sales', ALL), null, stub);
+  }
+  assert.deepEqual(cleanChatReply('Luma 3, согласен, но латте дороже 3 €.', 'sales', ALL), { text: 'Luma 3, согласен, но латте дороже 3 €.', to: 'product' });
+  assert.deepEqual(cleanChatReply('Luma 3, проверь цену.', 'sales', ALL), { text: 'Luma 3, проверь цену.', to: 'product' }, 'короткая, но по делу');
 });
 
 test('cleanChatReply: подпись автора убрана, максимум два предложения, адресат — участник обсуждения', () => {
@@ -88,6 +94,17 @@ test('reduceTask: agent-chat попадает в обсуждение, а не �
   assert.deepEqual(resetTask(task).chat, []);
 });
 
+test('reduceTask: после итога идёт обсуждение — статус «discussion», а не «Проверка CEO»', () => {
+  let task = resetTask({ id: 't', title: 'x', agentId: 'ceo', status: 'planning', createdAt: '' });
+  task = reduceTask(task, { type: 'final', result: 'отчёт' });
+  assert.equal(task.status, 'review');
+  task = reduceTask(task, { type: 'chat-start' });
+  assert.equal(task.status, 'discussion');
+  assert.equal(task.result, 'отчёт');
+  task = reduceTask(task, { type: 'done' });
+  assert.equal(task.status, 'done');
+});
+
 // --- HTTP с мок-моделью ---
 
 const CHAT_ANSWERS = {
@@ -150,6 +167,7 @@ test('CROSS_TALK по умолчанию выключен: ни одного л�
   assert.equal(model.calls.length, 5);
   assert.ok(!model.calls.some(c => c.agentId.startsWith('chat-')));
   assert.equal(ofType(events, 'agent-chat').length, 0);
+  assert.equal(ofType(events, 'chat-start').length, 0);
   assert.equal(ofType(events, 'done').length, 1);
 });
 
@@ -164,9 +182,11 @@ test('CROSS_TALK=true: реплики — отдельные события agen
     { agentId: 'research', to: 'product', text: 'Luma 3, какие напитки дешевле всего для студентов?' },
     { agentId: 'finance', to: 'sales', text: 'Luma 5, сколько клиентов даст листовка в первую неделю? Это нужно для выручки.' }
   ]);
-  // Реплики после итога и до done: отчёт их не ждёт и не содержит.
+  // Реплики после итога и до done: отчёт их не ждёт и не содержит. Начало обсуждения отмечено событием chat-start.
   const final = ofType(events, 'final')[0];
-  assert.ok(events.indexOf(final) < events.indexOf(chats[0]));
+  const chatStart = ofType(events, 'chat-start');
+  assert.equal(chatStart.length, 1);
+  assert.ok(events.indexOf(final) < events.indexOf(chatStart[0]) && events.indexOf(chatStart[0]) < events.indexOf(chats[0]));
   assert.ok(events.indexOf(chats.at(-1)) < events.findIndex(e => e.type === 'done'));
   // Реплика остаётся подписью сотрудника на сцене: после agent-chat его статус больше не меняется.
   for (const chat of chats) {

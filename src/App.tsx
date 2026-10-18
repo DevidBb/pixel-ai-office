@@ -18,7 +18,7 @@ const agentStatusLabel: Record<Agent['status'], string> = {
   idle: 'Ожидает', working: 'Работает', thinking: 'Думает', done: 'Готово', error: 'Ошибка'
 };
 const taskStatusLabel: Record<TaskStatus, string> = {
-  planning: 'Планирует', working: 'Выполняется', review: 'Проверка CEO', done: 'Завершено', error: 'Ошибка'
+  planning: 'Планирует', working: 'Выполняется', review: 'Проверка CEO', discussion: 'Обсуждение команды', done: 'Завершено', error: 'Ошибка'
 };
 const STORAGE_KEY = 'pixel-ai-office.tasks.stage2';
 
@@ -42,7 +42,7 @@ function loadSavedTasks(): OfficeTask[] {
   }
 }
 
-const RUNNING_STATUSES: TaskStatus[] = ['planning', 'working', 'review'];
+const RUNNING_STATUSES: TaskStatus[] = ['planning', 'working', 'review', 'discussion'];
 const RECONNECT_DELAY_MS = 2_000;
 const RECONNECT_ATTEMPTS = 30;
 const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));

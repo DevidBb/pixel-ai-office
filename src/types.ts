@@ -1,5 +1,5 @@
 export type AgentStatus = 'idle' | 'working' | 'thinking' | 'done' | 'error';
-export type TaskStatus = 'planning' | 'working' | 'review' | 'done' | 'error';
+export type TaskStatus = 'planning' | 'working' | 'review' | 'discussion' | 'done' | 'error';
 export type SubtaskStatus = 'queued' | 'working' | 'done' | 'error';
 
 export type Agent = {

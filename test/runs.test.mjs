@@ -218,6 +218,45 @@ test('перезапуск сервера после готового итога
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
+test('после перезапуска новые события получают номера больше прежних: переподключение с ?after видит конец задачи', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    for (const withFinal of [true, false]) {
+      const store = new RunStore({ dataDir });
+      const run = store.create(COFFEE_GOAL);
+      // Черновики сдавшего результат сотрудника на диск не пишутся — событий в файле меньше, чем последний номер.
+      for (let i = 0; i < 5; i++) store.emit(run, 'agent-delta', { agentId: 'research', subtaskId: 'task-research', text: 'x' });
+      store.emit(run, 'agent-result', { agentId: 'research', subtaskId: 'task-research', result: 'группы' });
+      if (withFinal) store.emit(run, 'final', { result: 'отчёт' });
+      store.emit(run, 'agent-status', { agentId: 'product', status: 'thinking', task: 'Пишет коллеге' });
+      store.persistNow(run);
+      const lastSeen = run.events.at(-1).seq;
+      const loaded = new RunStore({ dataDir }).get(run.id);
+      const seqs = loaded.events.map(e => e.seq);
+      assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b), 'номера по возрастанию');
+      assert.equal(new Set(seqs).size, seqs.length, 'без повторов');
+      const resumed = [];
+      store.subscribe(loaded, lastSeen, event => resumed.push(event?.type ?? 'END'));
+      assert.deepEqual(resumed.slice(-2), withFinal ? ['done', 'END'] : ['error', 'END']);
+      store.flush();
+    }
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('итог (final) сразу пишется на диск: перезапуск сразу после него не теряет отчёт', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    const store = new RunStore({ dataDir, persistDelayMs: 60_000 });
+    const run = store.create(COFFEE_GOAL);
+    store.emit(run, 'agent-result', { agentId: 'research', subtaskId: 'task-research', result: 'группы' });
+    store.emit(run, 'final', { result: 'отчёт' });
+    const loaded = new RunStore({ dataDir }).get(run.id);
+    assert.equal(loaded.status, 'done');
+    assert.equal(loaded.events.find(e => e.type === 'final')?.result, 'отчёт');
+    store.flush();
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('хранятся только последние N задач, повреждённый файл не ломает запуск', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
   try {

@@ -604,7 +604,11 @@ export function chatMessages(agent, ownResult, peers) {
 const DECIMAL_DOT = '\uE000';
 
 // Ответ-заглушка: «OK», «Хорошо.», «Понял», «—». Такую реплику не показываем.
-const STUB_REPLY = /^(?:ok(?:ay)?|ок(?:ей)?|хорошо|ладно|понял[аи]?|принято|да|нет|готово|согласен|согласна|спасибо|ясно|n\/?a|нет\s+замечаний|без\s+замечаний)$/iu;
+// Несколько таких слов подряд («OK, согласен») — тоже заглушка.
+const STUB_WORD = String.raw`(?:ok(?:ay)?|ок(?:ей)?|хорошо|ладно|понял[аи]?|принято|да|нет|готово|согласен|согласна|спасибо|ясно|n\/?a|нет\s+замечаний|без\s+замечаний)`;
+const STUB_REPLY = new RegExp(String.raw`^${STUB_WORD}(?:\s+${STUB_WORD})*$`, 'iu');
+// Обращение в начале («Luma 3, …») подсказка требует, но содержанием реплики оно не считается.
+const LEADING_ADDRESS = /^(?:luma|люма)\s*[-#№]?\s*[1-6](?!\d)/iu;
 
 /**
  * Реплика коллеге из ответа модели или null. Убирает <think>, свою подпись («Luma 5:»), кавычки,
@@ -632,8 +636,8 @@ export function cleanChatReply(text, speakerId, participantIds = [], { truncated
   const picked = sentences.slice(0, 2);
   if (truncated && picked.length === 2 && !/[.!?…]["'»”“’)\]]*$/u.test(picked[1].trim())) picked.pop();
   reply = clip(picked.join('').replaceAll(DECIMAL_DOT, '.').trim(), 280);
-  const bare = reply.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim();
-  if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 12) return null;
+  const bare = reply.replace(LEADING_ADDRESS, '').replace(/[\s\p{P}\p{S}]+/gu, ' ').trim();
+  if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 8) return null;
   let to;
   for (const match of reply.matchAll(NAME_MENTION)) {
     const agent = agentByNumber(match[1]);

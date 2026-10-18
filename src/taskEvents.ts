@@ -51,6 +51,9 @@ export function reduceTask(task: OfficeTask, event: RunEvent): OfficeTask {
       return { ...task, status: 'review' };
     case 'final':
       return { ...task, status: 'review', result: event.result || '' };
+    case 'chat-start':
+      // Итог готов, команда обсуждает результаты (CROSS_TALK): CEO уже ничего не проверяет.
+      return { ...task, status: 'discussion' };
     case 'done':
       return { ...task, status: 'done' };
     case 'error': {
