@@ -7,6 +7,7 @@ import { readConfig } from '../server/config.mjs';
 import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import { RunStore } from '../server/runs.mjs';
+import { taskFromRun } from '../src/taskEvents.ts';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS } from './fixtures.mjs';
 
 const config = readConfig({ OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1', OPENAI_MODEL: 'mock' });
@@ -192,6 +193,28 @@ test('задача, прерванная перезапуском сервера
     assert.match(last.message, /перезапущен/);
     // Повторная загрузка не добавляет вторую пометку.
     assert.equal(new RunStore({ dataDir }).get(run.id).events.filter(e => e.interrupted).length, 1);
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
+test('перезапуск сервера после готового итога (идёт обсуждение CROSS_TALK): задача завершена, отчёт виден', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    const store = new RunStore({ dataDir });
+    const run = store.create(COFFEE_GOAL);
+    store.emit(run, 'agent-result', { agentId: 'research', subtaskId: 'task-research', result: 'группы' });
+    store.emit(run, 'final', { result: '## Кто выполнил задачу\n- ✅ Luma 2' });
+    store.emit(run, 'agent-status', { agentId: 'research', status: 'thinking', task: 'Пишет коллеге' });
+    store.persistNow(run);
+    const loaded = new RunStore({ dataDir }).get(run.id);
+    assert.equal(loaded.status, 'done');
+    assert.ok(!loaded.events.some(e => e.type === 'error'), 'итог не заменяется сообщением о перезапуске');
+    assert.equal(loaded.events.at(-1).type, 'done');
+    assert.ok(loaded.events.some(e => e.type === 'log' && /перезапуск/.test(e.message)));
+    const lastStatus = new Map(loaded.events.filter(e => e.type === 'agent-status').map(e => [e.agentId, e.status]));
+    assert.equal(lastStatus.get('research'), 'done');
+    const task = taskFromRun({ ...loaded, controller: undefined, subscribers: undefined, timer: undefined });
+    assert.equal(task.status, 'done');
+    assert.match(task.result, /^## Кто выполнил задачу/);
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 

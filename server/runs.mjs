@@ -24,6 +24,10 @@ export class RunStore {
       try {
         const saved = JSON.parse(readFileSync(join(this.dir, file), 'utf8'));
         const run = this.hydrate(saved);
+        // Перезапуск после готового итога оборвал только обсуждение команды (CROSS_TALK): задача завершена.
+        if (!FINISHED.has(run.status) && this.hasFinal(run)) {
+          this.finishAfterFinal(run, 'Обсуждение команды прервано перезапуском сервера. Итоговый отчёт сохранён.');
+        }
         // Сервер перезапустился посреди задачи: модель уже не отвечает ей, честно помечаем как прерванную.
         if (!FINISHED.has(run.status)) {
           this.push(run, 'error', { message: 'Сервер был перезапущен во время выполнения задачи. Готовые результаты сотрудников сохранены выше.', interrupted: true });
@@ -90,22 +94,30 @@ export class RunStore {
   cancel(run) {
     if (FINISHED.has(run.status)) return false;
     run.controller?.abort(new Error('cancelled by user'));
-    // Итог уже отправлен (final) — остановка обрывает только необязательное обсуждение команды (CROSS_TALK):
-    // отчёт остаётся, задача завершена; кто писал реплику, больше не «думает».
-    if (run.events.some(event => event.type === 'final')) {
-      const lastStatus = new Map(run.events.filter(event => event.type === 'agent-status').map(event => [event.agentId, event.status]));
-      for (const [agentId, status] of lastStatus) {
-        if (status === 'thinking' || status === 'working') this.push(run, 'agent-status', { agentId, status: 'done', task: 'Подзадача готова' });
-      }
-      this.push(run, 'log', { agentId: 'ceo', message: 'Обсуждение команды остановлено пользователем. Итоговый отчёт сохранён.', kind: 'warning' });
-      this.push(run, 'done', {});
-      this.finish(run, 'done');
+    // Итог уже отправлен (final) — остановка обрывает только необязательное обсуждение команды (CROSS_TALK).
+    if (this.hasFinal(run)) {
+      this.finishAfterFinal(run, 'Обсуждение команды остановлено пользователем. Итоговый отчёт сохранён.');
       return true;
     }
     this.push(run, 'error', { message: 'Выполнение остановлено пользователем.', cancelled: true });
     this.push(run, 'agent-status', { agentId: 'ceo', status: 'idle', task: 'Остановлено пользователем' });
     this.finish(run, 'cancelled');
     return true;
+  }
+
+  hasFinal(run) {
+    return run.events.some(event => event.type === 'final');
+  }
+
+  /** Обсуждение после итога оборвалось: отчёт остаётся, задача завершена, кто писал реплику, больше не «думает». */
+  finishAfterFinal(run, message) {
+    const lastStatus = new Map(run.events.filter(event => event.type === 'agent-status').map(event => [event.agentId, event.status]));
+    for (const [agentId, status] of lastStatus) {
+      if (status === 'thinking' || status === 'working') this.push(run, 'agent-status', { agentId, status: 'done', task: 'Подзадача готова' });
+    }
+    this.push(run, 'log', { agentId: 'ceo', message, kind: 'warning' });
+    this.push(run, 'done', {});
+    this.finish(run, 'done');
   }
 
   /** Подписка: сначала события после seq `after`, затем новые; onEvent(null) — задача завершена. */
