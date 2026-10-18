@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { routeByRules, routeByExplicit, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -399,4 +399,43 @@ test('запрет после «всей команды» про другого 
   assert.deepEqual(routeByRules('Всех сотрудников не нужно исключать, придумай слоган').agentIds, ALL);
   assert.deepEqual(routeByRules('Всю команду не надо ограничивать, придумай слоган').agentIds, ALL);
   assert.deepEqual(routeByRules('Не надо торопиться и подключи всю команду: придумай слоган').agentIds, ALL);
+});
+
+test('отказ от всей команды в разных формах: «не всю», «не хочу», «пожалуйста, не подключай», «лучше не», «не требуется»', () => {
+  for (const goal of [
+    'Не всю команду, а только Luma 4 — слоган',
+    'Не всю команду, только Luma 4: придумай слоган',
+    'Не хочу всю команду, придумай слоган',
+    'Не надо сразу всю команду, придумай слоган',
+    'Не нужно для этого всю команду, Luma 4 — слоган',
+    'Всю команду, пожалуйста, не подключай, Luma 4 — слоган',
+    'Всю команду лучше не подключай, придумай слоган',
+    'Всю команду не используй, Luma 4 — слоган',
+    'Всю команду не назначай, Luma 4 — слоган',
+    'Всю команду не приглашай, Luma 4 — слоган',
+    'Всю команду подключать не требуется, придумай слоган',
+    'Ни к чему подключать всю команду, придумай слоган',
+    'Не всех специалистов, только Luma 4 — слоган',
+    'Всех специалистов, пожалуйста, не зови, придумай слоган',
+    'Всех сотрудников лучше не подключай, придумай слоган',
+    'Всех сотрудников не используйте, придумай слоган'
+  ]) {
+    assert.deepEqual(routeByRules(goal).agentIds, ['creator'], goal);
+  }
+});
+
+test('«всем», «всеми», «всей» — не объект отказа: «не» рядом относится к другому, команда остаётся', () => {
+  for (const goal of [
+    'Всеми пятью специалистами не трогайте бюджет: идеи для кофейни',
+    'Всем пятерым не нужен отдельный отчёт: идеи для кофейни',
+    'Всем специалистам не нужны вступления: идеи для кофейни',
+    'Не используйте англицизмы работайте всей командой: идеи для кофейни',
+    'Не бери в расчёт конкурентов всей командой: идеи для кофейни'
+  ]) {
+    assert.deepEqual(routeByExplicit(goal)?.agentIds, ALL, goal);
+  }
+  // Запрет с именем после глагола — про сотрудника, а не про команду; положительный глагол без запятой — новое действие.
+  assert.deepEqual(routeByExplicit('Подключи всех специалистов только не зови Luma 2: идеи для кофейни')?.agentIds, ['product', 'creator', 'sales', 'finance']);
+  assert.deepEqual(routeByExplicit('Не используй клише подключи всех специалистов: идеи для кофейни')?.agentIds, ALL);
+  assert.deepEqual(routeByExplicit('Не стесняйся подключить всю команду: идеи для кофейни')?.agentIds, ALL);
 });

@@ -65,23 +65,41 @@ const NEGATION_BEFORE = new RegExp(
   String.raw`(?:(?<!\p{L})${ADJACENT_EXCLUDE}|(?<!\p{L})${EXCLUDE_VERB}(?!\p{L})${EXCLUDE_GAP})\s+${EXCLUDE_FILLER}$`,
   'iu'
 );
-// Отказ от всей команды: «Не подключай всех специалистов», «Не надо подключать к этой работе всю команду».
-// Во вставке нет имён и союзов: в «Не подключай Luma 2 и поработайте всей командой» «не» относится к Luma 2.
-const WHOLE_TEAM_WORD = String.raw`\s+(?!(?:luma|люма|и|а|но|или|пусть|лучше)(?!\p{L}))[\p{L}-]+`;
+// Отказ от всей команды зависит от формы слова:
+// - «всем», «всеми», «всей» не бывают объектом отказа («Всем пятерым не нужен отчёт» — про отчёт): всегда просьба;
+// - «все», «всех» — отказ только по точным шаблонам ниже (до этой правки они всегда были просьбой);
+// - «всю» раньше не распознавалось: просьба, только если в том же фрагменте фразы нет отрицания (wholeTeamClauseNegated).
+// Во вставке нет имён, союзов и положительных глаголов: в «Не подключай Luma 2 и поработайте всей командой»
+// и «Не используй клише подключи всех специалистов» «не» относится к другому.
+const POSITIVE_VERB = String.raw`(?:подключи|задействуй|привлеки|позови|возьми|назначь|используй|работай|поработай)(?:те)?`;
+const WHOLE_TEAM_WORD = String.raw`\s+(?!(?:luma|люма|и|а|но|или|пусть|лучше|${POSITIVE_VERB})(?!\p{L}))[\p{L}-]+`;
 const WHOLE_TEAM_GAP = String.raw`(?:${POLITE}|${WHOLE_TEAM_WORD}){0,4}`;
-// «Не надо всю команду», «Не нужно, пожалуйста, всех сотрудников» — отказ без глагола, только вплотную:
-// в «Не надо торопиться и подключи всю команду» «не надо» относится к другому.
+// «Не подключай всех специалистов», «Не всех», «Не нужно, пожалуйста, всех сотрудников».
 const WHOLE_TEAM_NEGATED_BEFORE = new RegExp(
-  String.raw`(?<!\p{L})(?:${EXCLUDE_VERB}(?!\p{L})${WHOLE_TEAM_GAP}|не\s+(?:надо|нужно|стоит)(?:${POLITE})?)\s+$`,
+  String.raw`(?<!\p{L})(?:${EXCLUDE_VERB}(?!\p{L})${WHOLE_TEAM_GAP}|не(?:\s+(?:надо|нужно|стоит|хочу))?(?:${POLITE})?)\s+$`,
   'iu'
 );
-// «Всю команду подключать не надо», «Всех сотрудников не зовите» — отказ после самой просьбы, без запятой.
-// Через союз запрет относится к другому («…и не зови Luma 2»), а «не нужно исключать» — не отказ.
+// «Всех сотрудников, пожалуйста, не зовите», «Всех лучше не подключай», «…подключать не требуется».
+// Через союз или с именем после глагола запрет относится к другому («…и не зови Luma 2»), «не нужно исключать» — не отказ.
 const WHOLE_TEAM_NEGATED_AFTER = new RegExp(
-  String.raw`^(?:${WHOLE_TEAM_WORD}){0,2}?\s+не\s+(?:(?:подключай|привлекай|задействуй|зови|бери|трогай)(?:те)?|нуж(?:ен|на|ны)` +
-  String.raw`|(?:надо|нужно|стоит)(?=\s*(?:$|[,.;:!?]|(?:подключать|привлекать|задействовать|звать|брать|трогать)(?!\p{L}))))(?!\p{L})`,
+  String.raw`^(?:${POLITE}|\s+лучше|${WHOLE_TEAM_WORD}){0,2}?\s+не\s+(?:` +
+  String.raw`(?:подключай|привлекай|задействуй|используй|назначай|включай|добавляй|приглашай|зови|бери|трогай|ставь)(?:те)?(?!\p{L})(?!\s+(?:luma|люма)(?!\p{L}))` +
+  String.raw`|(?:нуж(?:ен|на|ны)|требуется)(?!\p{L})` +
+  String.raw`|(?:надо|нужно|стоит)(?=\s*(?:$|[,.;:!?]|(?:подключать|привлекать|задействовать|использовать|назначать|включать|добавлять|приглашать|звать|брать|трогать)(?!\p{L}))))`,
   'iu'
 );
+// Фрагмент фразы — до запятой, точки, двоеточия, тире или союза; «пожалуйста» в запятых фрагмент не делит.
+const CLAUSE_SPLIT = /[,.;:!?\n—–]|(?<!\p{L})(?:и|а|но|или|либо)(?!\p{L})/iu;
+const POLITE_INSERT = new RegExp(POLITE, 'giu');
+// «Не забудь», «не стесняйся», «не нужно исключать» — по смыслу не отказ.
+const NOT_A_REFUSAL = /(?<!\p{L})не\s+(?:забудь|забудьте|забывай|забывайте|стесняйся|стесняйтесь|(?:надо|нужно|стоит)\s+(?:исключать|ограничивать))(?!\p{L})/giu;
+const CLAUSE_NEGATION = /(?<!\p{L})(?:не|ни|нет)(?!\p{L})/iu;
+
+function wholeTeamClauseNegated(goal, start, end) {
+  const before = goal.slice(0, start).replace(POLITE_INSERT, ' ').split(CLAUSE_SPLIT).at(-1);
+  const after = goal.slice(end).replace(POLITE_INSERT, ' ').split(CLAUSE_SPLIT)[0];
+  return CLAUSE_NEGATION.test(`${before} ${after}`.replace(NOT_A_REFUSAL, ' '));
+}
 // «Не»/«без» в том же фрагменте, но не распознанное как запрет — сотрудник остаётся, а CEO предупреждает.
 const UNCERTAIN_NEGATION = /(?<!\p{L})(?:не|без)(?!\p{L})[^,;.:!?\n]*$/iu;
 // После имени: «Luma 2 не нужен», «Luma 5 не участвует», «Luma 4 не нужно», «Luma 3 не надо подключать»,
@@ -225,9 +243,16 @@ export function parseAssignments(goal) {
 }
 
 export function wantsWholeTeam(goal) {
-  return ALL_TEAM_PATTERNS.some(pattern => [...goal.matchAll(pattern)].some(match =>
-    !WHOLE_TEAM_NEGATED_BEFORE.test(goal.slice(0, match.index)) &&
-    !WHOLE_TEAM_NEGATED_AFTER.test(goal.slice(match.index + match[0].length))));
+  return ALL_TEAM_PATTERNS.some(pattern => [...goal.matchAll(pattern)].some(match => {
+    const start = match.index;
+    const end = start + match[0].length;
+    const form = match[0].match(/^\p{L}+/u)[0].toLowerCase();
+    if (form === 'всю') return !wholeTeamClauseNegated(goal, start, end);
+    if (form === 'все' || form === 'всех') {
+      return !WHOLE_TEAM_NEGATED_BEFORE.test(goal.slice(0, start)) && !WHOLE_TEAM_NEGATED_AFTER.test(goal.slice(end));
+    }
+    return true;
+  }));
 }
 
 export function isShortRequest(goal) {
