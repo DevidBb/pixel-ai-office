@@ -25,7 +25,11 @@ function request(port, { method = 'POST', path = '/api/runs', headers = {}, body
     const req = http.request({ host: '127.0.0.1', port, method, path, headers }, res => {
       let data = '';
       res.on('data', chunk => { data += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }));
+      res.on('end', () => {
+        let body = data || null;
+        try { body = data ? JSON.parse(data) : null; } catch { /* SSE или текст — оставляем строкой */ }
+        resolve({ status: res.statusCode, body });
+      });
     });
     req.on('error', reject);
     if (body) req.write(body);
@@ -109,4 +113,50 @@ test('по умолчанию Vite слушает только 127.0.0.1', async
   const scripts = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).scripts;
   for (const name of ['dev', 'start', 'dev:web']) assert.ok(!scripts[name].includes('0.0.0.0'), name);
   assert.match(scripts['dev:lan'], /OFFICE_ALLOW_LAN=true/);
+});
+
+// Ревью Codex (PR #6, P1): GET /api/health/model вызывал модель и был доступен чужому сайту через <img src>.
+test('GET /api/health/model больше не вызывает модель (405), проверка — только POST', async () => {
+  await withServer(readConfig(env), async (port, { calls }) => {
+    // Так выглядит запрос от <img src="http://127.0.0.1:8787/api/health/model"> на чужой странице.
+    const img = await request(port, { method: 'GET', path: '/api/health/model', headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image' } });
+    assert.equal(img.status, 403);
+    // Старый браузер без Fetch Metadata и без Origin — всё равно не вызывает модель.
+    const legacy = await request(port, { method: 'GET', path: '/api/health/model' });
+    assert.equal(legacy.status, 405);
+    assert.match(legacy.body.error, /используй POST/);
+    assert.equal(calls.length, 0, 'модель не вызывалась');
+    // Свой вызов (curl или страница офиса) работает.
+    const own = await request(port, { path: '/api/health/model', headers: { origin: 'http://localhost:5173' } });
+    assert.equal(own.status, 200);
+    assert.equal(own.body.ok, true);
+    assert.deepEqual(calls, ['health-check']);
+    // POST с чужого сайта — 403 без вызова модели.
+    assert.equal((await request(port, { path: '/api/health/model', headers: { origin: 'https://evil.example' } })).status, 403);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test('Sec-Fetch-Site: cross-site отклоняется для любых маршрутов, same-origin и none проходят', async () => {
+  await withServer(readConfig(env), async (port, { runs }) => {
+    const run = runs.create('x');
+    for (const path of ['/api/health', '/api/runs', `/api/runs/${run.id}`, `/api/runs/${run.id}/events`]) {
+      assert.equal((await request(port, { method: 'GET', path, headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, path);
+    }
+    assert.equal((await request(port, { headers: { ...json, 'sec-fetch-site': 'cross-site' }, body: goal })).status, 403);
+    for (const site of ['same-origin', 'same-site', 'none']) {
+      assert.equal((await request(port, { method: 'GET', path: '/api/health', headers: { 'sec-fetch-site': site } })).status, 200, site);
+    }
+  });
+});
+
+test('ни один GET-маршрут не вызывает модель', async () => {
+  await withServer(readConfig(env), async (port, { calls, runs }) => {
+    const run = runs.create('x');
+    runs.emit(run, 'done', {});
+    for (const path of ['/api/health', '/api/health/model', '/api/runs', `/api/runs/${run.id}`, `/api/runs/${run.id}/events`, '/api/execute', '/api/unknown']) {
+      await request(port, { method: 'GET', path });
+    }
+    assert.deepEqual(calls, []);
+  });
 });

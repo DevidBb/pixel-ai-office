@@ -27,6 +27,9 @@ function hostnameOf(value) {
 function rejectUntrusted(req, config) {
   const host = hostnameOf(req.headers.host || '');
   if (!host || !LOCAL_HOSTS.has(host)) return [421, 'Запрос к API должен идти на localhost.'];
+  // Fetch Metadata: браузер сам помечает запросы с чужих сайтов — даже GET без Origin
+  // (<img src>, <script src>, переход по ссылке). Страница офиса через прокси Vite даёт same-origin.
+  if (req.headers['sec-fetch-site'] === 'cross-site') return [403, 'Запрос с чужого сайта отклонён. Офис принимает задачи только со своей страницы.'];
   if (req.method === 'GET' || req.method === 'HEAD') return null;
   const origin = req.headers.origin;
   if (origin) {
@@ -357,8 +360,12 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens
       });
     }
-    if (req.method === 'GET' && req.url === '/api/health/model') {
-      return sendJson(res, 200, { model: config.model, provider: config.provider, think: config.ollamaThink, ...(await checkModel()) });
+    // Проверка модели вызывает модель (занимает очередь, у платного API стоит денег), поэтому только POST:
+    // его с чужого сайта отсекает проверка Origin выше. GET здесь — только подсказка.
+    if (req.url === '/api/health/model') {
+      if (req.method === 'POST') return sendJson(res, 200, { model: config.model, provider: config.provider, think: config.ollamaThink, ...(await checkModel()) });
+      res.setHeader('allow', 'POST');
+      return sendJson(res, 405, { error: 'Проверка модели вызывает модель — используй POST: curl -X POST http://127.0.0.1:8787/api/health/model' });
     }
     if (req.method === 'POST' && req.url === '/api/execute') {
       try {
