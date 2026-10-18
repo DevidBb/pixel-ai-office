@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import Phaser from 'phaser';
-import { OfficeScene } from './OfficeScene';
+import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import './stage2.css';
@@ -51,10 +50,13 @@ const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, 
 export default function App() {
   const gameHost = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<OfficeScene | null>(null);
+  const [sceneState, setSceneState] = useState<'loading' | 'ready' | 'error'>('loading');
   const abortRef = useRef<AbortController | null>(null);
   const activeTaskRef = useRef<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
+  // Актуальные сотрудники для сцены, которая загружается позже первого рендера.
+  const agentsRef = useRef(agents);
   const [tasks, setTasks] = useState<OfficeTask[]>(loadSavedTasks);
   const [prompt, setPrompt] = useState('');
   const [selectedAgent, setSelectedAgent] = useState('ceo');
@@ -63,31 +65,25 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
 
   useEffect(() => {
-    const game = new Phaser.Game({
-      type: Phaser.CANVAS,
-      parent: gameHost.current ?? undefined,
-      width: 1000,
-      height: 700,
-      backgroundColor: '#c9c6ba',
-      pixelArt: true,
-      antialias: false,
-      scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
-      scene: {
-        preload() {},
-        create(this: Phaser.Scene) {
-          const scene = new OfficeScene();
-          game.scene.add('office', scene, true, { agents: initialAgents });
+    let cancelled = false;
+    let destroyGame: (() => void) | undefined;
+    // Phaser и сцена — отдельный файл: интерфейс задач появляется сразу, сцена догружается.
+    import('./officeGame')
+      .then(({ createOfficeGame }) => {
+        if (cancelled || !gameHost.current) return;
+        destroyGame = createOfficeGame(gameHost.current, () => agentsRef.current, scene => {
           sceneRef.current = scene;
-          agents.forEach(agent => scene.updateAgent(agent));
-        }
-      }
-    });
-    return () => { abortRef.current?.abort(); game.destroy(true); sceneRef.current = null; };
+          setSceneState('ready');
+        });
+      })
+      .catch(() => { if (!cancelled) setSceneState('error'); });
+    return () => { cancelled = true; abortRef.current?.abort(); destroyGame?.(); sceneRef.current = null; };
     // Phaser must be instantiated once; the scene receives state updates below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    agentsRef.current = agents;
     agents.forEach(agent => sceneRef.current?.updateAgent(agent));
   }, [agents]);
 
@@ -352,7 +348,7 @@ export default function App() {
         <div className="main-grid">
           <section className="office-panel">
             <div className="panel-header"><div><span className="panel-kicker">FLOOR 01</span><h2>Основной офис</h2></div><span className="tiny-status"><i /> {isRunning ? 'КОМАНДА РАБОТАЕТ' : 'ГОТОВ К РАБОТЕ'}</span></div>
-            <div className="scene-frame"><div ref={gameHost} className="game-host" /></div>
+            <div className="scene-frame"><div ref={gameHost} className="game-host" />{sceneState !== 'ready' && <div className="scene-placeholder" role="status">{sceneState === 'error' ? 'Не удалось загрузить сцену офиса. Работа команды и задачи не затронуты.' : 'Загрузка сцены офиса…'}</div>}</div>
             <div className="legend"><span><i className="dot idle" />Ожидает</span><span><i className="dot working" />Работает</span><span><i className="dot done" />Готово</span><span><i className="dot error" />Ошибка</span></div>
           </section>
 
