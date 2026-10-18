@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import Phaser from 'phaser';
 import { OfficeScene } from './OfficeScene';
-import type { Agent, ModelStats, OfficeLog, OfficeSubtask, OfficeTask, TaskStatus } from './types';
+import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
+import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import './stage2.css';
 
 const initialAgents: Agent[] = [
@@ -21,28 +22,6 @@ const taskStatusLabel: Record<TaskStatus, string> = {
   planning: 'Планирует', working: 'Выполняется', review: 'Проверка CEO', done: 'Завершено', error: 'Ошибка'
 };
 const STORAGE_KEY = 'pixel-ai-office.tasks.stage2';
-
-type ApiEvent = {
-  type: string;
-  agentId?: string;
-  status?: Agent['status'];
-  task?: string;
-  message?: string;
-  summary?: string;
-  subtasks?: OfficeSubtask[];
-  subtaskId?: string;
-  title?: string;
-  result?: string;
-  kind?: OfficeLog['kind'];
-  /** Порядковый номер и время события задачи на сервере (/api/runs). */
-  seq?: number;
-  at?: number;
-  cancelled?: boolean;
-  interrupted?: boolean;
-  stats?: ModelStats;
-  foreign?: string[];
-  text?: string;
-};
 
 function formatStats(stats?: ModelStats) {
   if (!stats) return '';
@@ -64,14 +43,6 @@ function loadSavedTasks(): OfficeTask[] {
   }
 }
 
-function clockNow(at?: number) {
-  return new Date(at ?? Date.now()).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-}
-
-function makeLog(agentId: string, message: string, kind?: OfficeLog['kind'], at?: number): OfficeLog {
-  return { id: crypto.randomUUID(), time: clockNow(at), agentId, message, kind };
-}
-
 const RUNNING_STATUSES: TaskStatus[] = ['planning', 'working', 'review'];
 const RECONNECT_DELAY_MS = 2_000;
 const RECONNECT_ATTEMPTS = 30;
@@ -82,6 +53,7 @@ export default function App() {
   const sceneRef = useRef<OfficeScene | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const activeTaskRef = useRef<string | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
   const [tasks, setTasks] = useState<OfficeTask[]>(loadSavedTasks);
   const [prompt, setPrompt] = useState('');
@@ -158,84 +130,26 @@ export default function App() {
     updateTask(taskId, task => ({ ...task, logs: [...(task.logs || []), makeLog(agentId, message, kind, at)] }));
   }
 
-  function handleApiEvent(taskId: string, event: ApiEvent) {
-    if (event.type === 'log' && event.agentId && event.message) {
-      addLog(taskId, event.agentId, event.message, event.kind, event.at);
-      return;
-    }
+  function handleApiEvent(taskId: string, event: RunEvent) {
+    updateTask(taskId, task => reduceTask(task, event));
+    // Сотрудники на сцене — только для задачи, которая идёт сейчас.
     if (event.type === 'agent-status' && event.agentId && event.status) {
       updateAgent(event.agentId, agent => ({ ...agent, status: event.status!, task: event.task || agent.task }));
-      return;
-    }
-    if (event.type === 'plan') {
+    } else if (event.type === 'plan') {
       const assigned = new Set((event.subtasks || []).map(subtask => subtask.agentId));
-      updateTask(taskId, task => ({ ...task, status: 'working', planSummary: event.summary || '', subtasks: event.subtasks || [] }));
       setAgents(current => current.map(agent => agent.id === 'ceo'
         ? { ...agent, status: 'working', task: 'Координирует команду' }
         : assigned.has(agent.id) ? agent : { ...agent, status: 'idle', task: 'Не назначен в этой задаче' }));
-      return;
-    }
-    if (event.type === 'agent-start' && event.agentId && event.subtaskId) {
-      updateTask(taskId, task => ({
-        ...task,
-        status: 'working',
-        subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId ? { ...subtask, status: 'working' } : subtask)
-      }));
-      if (event.title) updateAgent(event.agentId, agent => ({ ...agent, task: event.title!, status: 'working' }));
-      return;
-    }
-    if (event.type === 'agent-delta' && event.subtaskId && event.text) {
-      updateTask(taskId, task => ({
-        ...task,
-        subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId
-          ? { ...subtask, draft: (subtask.draft || '') + event.text }
-          : subtask)
-      }));
-      return;
-    }
-    if (event.type === 'agent-result' && event.agentId && event.subtaskId) {
-      updateTask(taskId, task => ({
-        ...task,
-        subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId
-          ? { ...subtask, status: 'done', result: event.result || 'Агент вернул пустой результат.', draft: undefined, stats: event.stats, foreign: event.foreign }
-          : subtask)
-      }));
-      return;
-    }
-    if (event.type === 'agent-error' && event.agentId && event.subtaskId) {
-      updateTask(taskId, task => ({
-        ...task,
-        subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId
-          ? { ...subtask, status: 'error', result: `Ошибка: ${event.message || 'неизвестная ошибка'}` }
-          : subtask)
-      }));
-      return;
-    }
-    if (event.type === 'review-start') {
-      updateTask(taskId, task => ({ ...task, status: 'review' }));
+    } else if (event.type === 'agent-start' && event.agentId && event.title) {
+      updateAgent(event.agentId, agent => ({ ...agent, task: event.title!, status: 'working' }));
+    } else if (event.type === 'review-start') {
       updateAgent('ceo', agent => ({ ...agent, status: 'thinking', task: event.message || 'Проверяет результаты команды' }));
-      return;
-    }
-    if (event.type === 'final') {
-      updateTask(taskId, task => ({ ...task, status: 'review', result: event.result || '' }));
-      return;
-    }
-    if (event.type === 'done') {
-      updateTask(taskId, task => ({ ...task, status: 'done' }));
+    } else if (event.type === 'done') {
       updateAgent('ceo', agent => ({ ...agent, status: 'done', task: 'Итоговый отчёт готов' }));
-      setIsRunning(false);
-      activeTaskRef.current = null;
-      abortRef.current = null;
-      return;
-    }
-    if (event.type === 'error') {
-      const message = event.message || 'Неизвестная ошибка.';
-      updateTask(taskId, task => ({ ...task, status: 'error', result: event.cancelled || event.interrupted ? message : `Выполнение остановлено: ${message}` }));
-      addLog(taskId, 'ceo', `Ошибка: ${message}`, 'warning', event.at);
+      finishLocally(taskId);
+    } else if (event.type === 'error') {
       updateAgent('ceo', agent => ({ ...agent, status: 'error', task: 'Нужна проверка ошибки' }));
-      setIsRunning(false);
-      activeTaskRef.current = null;
-      abortRef.current = null;
+      finishLocally(taskId);
     }
   }
 
@@ -258,7 +172,7 @@ export default function App() {
       if (token.cancelled || activeTaskRef.current !== taskId) return;
       const controller = new AbortController();
       abortRef.current = controller;
-      updateTask(taskId, task => ({ ...task, status: 'planning', planSummary: undefined, subtasks: [], logs: [], result: undefined }));
+      updateTask(taskId, resetTask);
       setAgents(initialAgents);
       try {
         const response = await fetch(`/api/runs/${runId}/events?after=0`, { signal: controller.signal });
@@ -274,7 +188,7 @@ export default function App() {
         const consumeBlock = (block: string) => {
           const dataLines = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim());
           if (!dataLines.length) return;
-          try { handleApiEvent(taskId, JSON.parse(dataLines.join('\n')) as ApiEvent); } catch { /* ignore malformed event */ }
+          try { handleApiEvent(taskId, JSON.parse(dataLines.join('\n')) as RunEvent); } catch { /* ignore malformed event */ }
         };
         while (true) {
           const { value, done } = await reader.read();
@@ -300,22 +214,50 @@ export default function App() {
     finishLocally(taskId);
   }
 
-  // После перезагрузки страницы: подключиться к незавершённой задаче на сервере.
+  // При открытии страницы: подгрузить с сервера задачи, которых нет в этом браузере (история data/runs),
+  // и подключиться к незавершённой задаче.
   useEffect(() => {
-    const unfinished = tasks.find(task => RUNNING_STATUSES.includes(task.status));
-    if (!unfinished) return;
-    if (unfinished.runId) {
-      // В StrictMode эффект запускается дважды: очистка обрывает первое подключение, второе начинает заново.
-      const token = { cancelled: false };
-      void followRun(unfinished.id, unfinished.runId, token);
-      return () => { token.cancelled = true; abortRef.current?.abort(); };
-    } else {
-      // Задача из старой версии (до /api/runs) жила в соединении и прервалась вместе со страницей.
-      updateTask(unfinished.id, task => ({ ...task, status: 'error', result: task.result || 'Задача была прервана перезагрузкой страницы.' }));
-    }
+    const token = { cancelled: false };
+    void (async () => {
+      let restored: OfficeTask[] = [];
+      try {
+        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string }> };
+        const known = new Set(tasks.map(task => task.runId).filter(Boolean));
+        for (const { id } of runs.filter(run => !known.has(run.id))) {
+          const response = await fetch(`/api/runs/${id}`);
+          if (response.ok) restored.push(taskFromRun(await response.json() as ServerRun));
+        }
+      } catch { restored = []; /* сервер недоступен — показываем то, что есть в браузере */ }
+      if (token.cancelled) return;
+      const merged = mergeHistory(tasks, restored);
+      setTasks(merged);
+      const unfinished = merged.find(task => RUNNING_STATUSES.includes(task.status));
+      if (!unfinished) return;
+      if (unfinished.runId) {
+        void followRun(unfinished.id, unfinished.runId, token);
+      } else {
+        // Задача из старой версии (до /api/runs) жила в соединении и прервалась вместе со страницей.
+        updateTask(unfinished.id, task => ({ ...task, status: 'error', result: task.result || 'Задача была прервана перезагрузкой страницы.' }));
+      }
+    })();
+    // В StrictMode эффект запускается дважды: очистка обрывает первое подключение, второе начинает заново.
+    return () => { token.cancelled = true; abortRef.current?.abort(); };
     // Только при первом открытии страницы.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function repeatTask(task: OfficeTask) {
+    setPrompt(task.title);
+    promptRef.current?.focus();
+    promptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  async function deleteTask(task: OfficeTask) {
+    if (task.runId) {
+      try { await fetch(`/api/runs/${task.runId}`, { method: 'DELETE' }); } catch { /* удалим хотя бы из браузера */ }
+    }
+    setTasks(current => current.filter(item => item.id !== task.id));
+  }
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -328,6 +270,7 @@ export default function App() {
       agentId: 'ceo',
       status: 'planning',
       createdAt: clockNow(),
+      startedAt: new Date().toISOString(),
       subtasks: [],
       logs: [makeLog('ceo', 'Задача принята. CEO готовит план и распределяет работу.')]
     };
@@ -431,7 +374,7 @@ export default function App() {
               <form onSubmit={submitTask} className="task-form">
                 <div className="ceo-route"><span className="ceo-route-icon">C</span><span><strong>CEO · Luma 1</strong><small>Сам назначит специалистов и приоритеты</small></span></div>
                 <label htmlFor="task-prompt">КАКОЙ РЕЗУЛЬТАТ НУЖЕН?</label>
-                <textarea id="task-prompt" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Например: проверь спрос на услугу для малого бизнеса в Эстонии, подготовь предложение и план привлечения первого клиента…" rows={5} maxLength={5000} />
+                <textarea id="task-prompt" ref={promptRef} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Например: проверь спрос на услугу для малого бизнеса в Эстонии, подготовь предложение и план привлечения первого клиента…" rows={5} maxLength={5000} />
                 <div className="prompt-meta"><span>Можно адресовать задания: «Luma 4 — слоган»</span><span>{prompt.length}/5000</span></div>
                 <button className="dispatch-button" type="submit" disabled={!prompt.trim() || isRunning || apiConfigured === false}><span>{isRunning ? 'Команда выполняет задачу…' : 'Передать цель CEO'}</span><span>↗</span></button>
                 {isRunning && <button className="stop-button" type="button" onClick={stopTask}>Остановить выполнение</button>}
@@ -451,6 +394,10 @@ export default function App() {
                 <div className="task-item-copy">
                   <div className="task-title-line"><strong>{task.title}</strong><span className={`status-tag ${task.status}`}>{taskStatusLabel[task.status]}</span></div>
                   <small>{ceo?.name || 'CEO'} · {task.createdAt}</small>
+                  {!RUNNING_STATUSES.includes(task.status) && <div className="task-actions">
+                    <button type="button" onClick={() => repeatTask(task)} disabled={isRunning} title="Подставить текст задачи в поле, чтобы запустить заново">Повторить</button>
+                    <button type="button" onClick={() => void deleteTask(task)} title="Удалить из истории в браузере и на сервере">Удалить</button>
+                  </div>}
                   {task.planSummary && <div className="plan-summary"><strong>План CEO</strong><p>{task.planSummary}</p></div>}
                   {(task.subtasks || []).length > 0 && <div className="subtask-list"><h3>Назначенные подзадачи</h3>{task.subtasks!.map(subtask => {
                     const agent = agents.find(item => item.id === subtask.agentId);

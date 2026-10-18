@@ -354,6 +354,10 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         if (cancelled) diag(`[run ${run.id}] остановлено пользователем`);
         return sendJson(res, 200, { status: run.status, cancelled });
       }
+      if (req.method === 'DELETE' && !action) {
+        if (!runs.remove(run)) return sendJson(res, 409, { error: 'Задача ещё выполняется — сначала останови её.' });
+        return sendJson(res, 200, { deleted: true });
+      }
       if (req.method === 'GET' && !action) {
         const { id, goal, status, createdAt, updatedAt, events } = run;
         return sendJson(res, 200, { id, goal, status, createdAt, updatedAt, events });

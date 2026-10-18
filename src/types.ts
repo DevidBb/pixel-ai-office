@@ -60,4 +60,39 @@ export type OfficeTask = {
   result?: string;
   /** Номер задачи на сервере (/api/runs/:id) — по нему страница переподключается после перезагрузки. */
   runId?: string;
+  /** Время запуска (ISO) — для сортировки истории. */
+  startedAt?: string;
+};
+
+/** Событие задачи от сервера (SSE /api/runs/:id/events или /api/execute). */
+export type RunEvent = {
+  type: string;
+  agentId?: string;
+  status?: AgentStatus;
+  task?: string;
+  message?: string;
+  summary?: string;
+  subtasks?: OfficeSubtask[];
+  subtaskId?: string;
+  title?: string;
+  result?: string;
+  kind?: OfficeLog['kind'];
+  /** Порядковый номер и время события задачи на сервере (/api/runs). */
+  seq?: number;
+  at?: number;
+  cancelled?: boolean;
+  interrupted?: boolean;
+  stats?: ModelStats;
+  foreign?: string[];
+  text?: string;
+};
+
+/** Задача из GET /api/runs/:id. */
+export type ServerRun = {
+  id: string;
+  goal: string;
+  status: 'running' | 'done' | 'error' | 'cancelled' | 'interrupted';
+  createdAt: string;
+  updatedAt: string;
+  events: RunEvent[];
 };

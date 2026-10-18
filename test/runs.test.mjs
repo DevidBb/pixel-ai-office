@@ -241,3 +241,24 @@ test('на диск черновики agent-delta пишутся, пока со
     assert.equal(run.events.filter(e => e.type === 'agent-delta').length, 3, 'в памяти журнал полный');
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
+
+test('DELETE /api/runs/:id: завершённая удаляется с диска, идущая — 409', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    const model = slowModel(5_000);
+    const runs = new RunStore({ dataDir });
+    const { base, close } = await startServer(model, runs);
+    try {
+      const runId = await createRun(base, 'Придумай один слоган для кофейни');
+      await waitFor(() => model.calls.some(c => c.started));
+      assert.equal((await fetch(`${base}/api/runs/${runId}`, { method: 'DELETE' })).status, 409);
+      await fetch(`${base}/api/runs/${runId}/cancel`, { method: 'POST' });
+      const response = await fetch(`${base}/api/runs/${runId}`, { method: 'DELETE' });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { deleted: true });
+      assert.deepEqual(readdirSync(join(dataDir, 'runs')), []);
+      assert.deepEqual((await (await fetch(`${base}/api/runs`)).json()).runs, []);
+      assert.equal((await fetch(`${base}/api/runs/${runId}`, { method: 'DELETE' })).status, 404);
+    } finally { close(); }
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
