@@ -19,6 +19,8 @@ export class OfficeScene extends Phaser.Scene {
     data.agents.forEach(agent => this.drawDesk(agent));
     this.scale.on('resize', () => this.drawRoomDetails());
     this.initialized = true;
+    // Сцена могла загрузиться, когда задача уже идёт: сразу показать текущие статусы.
+    data.agents.forEach(agent => this.updateAgent(agent));
   }
 
   private drawFloor() {
