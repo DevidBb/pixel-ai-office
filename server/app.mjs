@@ -4,7 +4,7 @@ import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs
+  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs, chatMessages, cleanChatReply
 } from './office.mjs';
 
 const DELTA_INTERVAL_MS = 300;
@@ -295,6 +295,9 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
           : `Итоговый отчёт готов. Результаты сдали: ${results.map(r => agentLabel(r.agentId)).join(', ')}.`,
         kind: failed.length ? 'warning' : 'success'
       });
+      // Реплики — после итога: отчёт не ждёт обсуждения. Отмена прерывает и этот раунд.
+      if (config.crossTalk && results.length > 1) await crossTalk(results, { safeEmit, signal, runId });
+      if (cancelled()) return;
       diag(`[run ${runId}] завершено за ${Math.round((Date.now() - runStarted) / 1000)} с`, { ok: results.length, failed: failed.length });
       safeEmit('done', {});
     } catch (error) {
@@ -305,6 +308,36 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         safeEmit('agent-status', { agentId: 'ceo', status: 'error', task: 'Задача остановлена' });
         safeEmit('error', { message });
       }
+    }
+  }
+
+  /**
+   * Короткий раунд реплик (CROSS_TALK): каждый, кто сдал результат, пишет коллеге 1–2 предложения.
+   * Реплики — отдельные события agent-chat: не результаты, не попадают в «Кто выполнил задачу» и в проверку чужих имён.
+   * Всё состояние — в рамках одного запуска.
+   */
+  async function crossTalk(results, { safeEmit, signal, runId }) {
+    const participants = results.map(r => r.agentId);
+    safeEmit('log', { agentId: 'ceo', message: 'Команда коротко обсуждает результаты (CROSS_TALK).' });
+    for (const own of results) {
+      if (signal.aborted) return;
+      const agent = AGENTS.find(a => a.id === own.agentId);
+      const peers = results.filter(r => r.agentId !== own.agentId);
+      safeEmit('agent-status', { agentId: agent.id, status: 'thinking', task: 'Пишет коллеге' });
+      try {
+        const { text } = await callModel(chatMessages(agent, own.result, peers), {
+          maxTokens: config.crossTalkMaxTokens, signal, label: `${runId}/chat-${agent.id}`
+        });
+        if (signal.aborted) return;
+        const reply = cleanChatReply(text, agent.id, participants);
+        if (reply) safeEmit('agent-chat', { agentId: agent.id, ...reply });
+        else diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая или заглушка`, { text: String(text || '').slice(0, 80) });
+      } catch (error) {
+        if (signal.aborted) return;
+        // Реплика — необязательная часть: сбой не портит готовый итог.
+        diag(`[run ${runId}] реплика ${agent.id} не получена`, { error: error?.message });
+      }
+      safeEmit('agent-status', { agentId: agent.id, status: 'done', task: 'Подзадача готова' });
     }
   }
 
@@ -387,7 +420,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         concurrency: config.concurrency, activeCalls: limiter.active, queuedCalls: limiter.waiting,
         timeoutMs: config.timeoutMs, router: config.routerMode, ceoSummary: config.ceoSummary,
         agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens,
-        handoff: config.handoff
+        handoff: config.handoff, crossTalk: config.crossTalk
       });
     }
     // Проверка модели вызывает модель (занимает очередь, у платного API стоит денег), поэтому только POST:

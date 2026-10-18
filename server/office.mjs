@@ -586,3 +586,44 @@ export function handoffBlock(handoffs = []) {
   return handoffs.map(h => `ДАННЫЕ ОТ КОЛЛЕГИ (${agentLabel(h.agentId)}), используй как вход, не переписывай и не приписывай себе:\n${h.text}\n\n`).join('');
 }
 
+// --- Реплики команды (CROSS_TALK) ----------------------------------------------------------------
+export const CHAT_PEER_CHARS = 220;
+
+/** Подсказка для реплики коллеге: сжатые ответы, 1–2 предложения, обращение по имени. */
+export function chatMessages(agent, ownResult, peers) {
+  const own = clipLines(stripThink(ownResult), CHAT_PEER_CHARS);
+  const others = peers.map(p => `- ${agentLabel(p.agentId)}: ${clipLines(stripThink(p.result), CHAT_PEER_CHARS).replace(/\s*\n\s*/g, ' ')}`).join('\n');
+  const example = agentById(peers[0].agentId).name;
+  return [
+    { role: 'system', content: `Ты ${agent.name}, ${agent.role} в Pixel AI Office. Это короткая реплика коллеге в рабочем чате, а не отчёт. Отвечай на русском. Не выдумывай факты, клиентов и цифры.` },
+    { role: 'user', content: `ТВОЙ РЕЗУЛЬТАТ (сжато):\n${own.replace(/\s*\n\s*/g, ' ')}\n\nРЕЗУЛЬТАТЫ КОЛЛЕГ (сжато):\n${others}\n\nНапиши одному коллеге 1–2 предложения: уточнение, возражение или следующий шаг по его результату. Начни с имени коллеги («${example}, …»). Без приветствий и списков.` }
+  ];
+}
+
+// Ответ-заглушка: «OK», «Хорошо.», «Понял», «—». Такую реплику не показываем.
+const STUB_REPLY = /^(?:ok(?:ay)?|ок(?:ей)?|хорошо|ладно|понял[аи]?|принято|да|нет|готово|согласен|согласна|спасибо|ясно|n\/?a|нет\s+замечаний|без\s+замечаний)$/iu;
+
+/**
+ * Реплика коллеге из ответа модели или null. Убирает <think>, свою подпись («Luma 5:»), кавычки,
+ * оставляет максимум два предложения. to — первый упомянутый участник обсуждения (кроме самого автора).
+ */
+export function cleanChatReply(text, speakerId, participantIds = []) {
+  const speaker = agentById(speakerId);
+  // «Luma 5:», «**Luma 5 · Менеджер продаж**:» — подпись автора, не часть реплики.
+  const signature = speaker ? new RegExp(String.raw`^\s*(?:\*\*)?(?:luma|люма)\s*${speaker.name.slice(-1)}(?!\d)[^:\n]{0,40}?(?:\*\*)?\s*:\s*`, 'iu') : /$^/;
+  let reply = stripThink(text)
+    .replace(signature, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^["«“'\s]+|["»”'\s]+$/gu, '')
+    .trim();
+  const sentences = reply.match(/[^.!?…]+[.!?…]*/gu) || [];
+  reply = clip(sentences.slice(0, 2).join('').trim(), 280);
+  const bare = reply.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim();
+  if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 12) return null;
+  let to;
+  for (const match of reply.matchAll(NAME_MENTION)) {
+    const agent = agentByNumber(match[1]);
+    if (agent.id !== speakerId && participantIds.includes(agent.id)) { to = agent.id; break; }
+  }
+  return { text: reply, ...(to ? { to } : {}) };
+}

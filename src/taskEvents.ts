@@ -36,7 +36,12 @@ export function reduceTask(task: OfficeTask, event: RunEvent): OfficeTask {
       return event.subtaskId && event.text ? updateSubtask(task, event.subtaskId, s => ({ ...s, draft: (s.draft || '') + event.text })) : task;
     case 'agent-result':
       return event.subtaskId
-        ? updateSubtask(task, event.subtaskId, s => ({ ...s, status: 'done', result: event.result || 'Агент вернул пустой результат.', draft: undefined, stats: event.stats, foreign: event.foreign }))
+        ? updateSubtask(task, event.subtaskId, s => ({ ...s, status: 'done', result: event.result || 'Агент вернул пустой результат.', draft: undefined, stats: event.stats, foreign: event.foreign, handoffFrom: event.handoffFrom }))
+        : task;
+    case 'agent-chat':
+      // Реплика коллеге: отдельный список, результаты сотрудников не трогает.
+      return event.agentId && event.text
+        ? { ...task, chat: [...(task.chat || []), { id: crypto.randomUUID(), time: clockNow(event.at), agentId: event.agentId, to: event.to, text: event.text }] }
         : task;
     case 'agent-error':
       return event.subtaskId
@@ -60,7 +65,7 @@ export function reduceTask(task: OfficeTask, event: RunEvent): OfficeTask {
 
 /** Пустая задача, готовая к проигрыванию событий с начала. */
 export function resetTask(task: OfficeTask): OfficeTask {
-  return { ...task, status: 'planning', planSummary: undefined, subtasks: [], logs: [], result: undefined };
+  return { ...task, status: 'planning', planSummary: undefined, subtasks: [], logs: [], chat: [], result: undefined };
 }
 
 /** Задача из истории сервера (data/runs), которой нет в этом браузере. */
@@ -74,7 +79,8 @@ export function taskFromRun(run: ServerRun): OfficeTask {
     createdAt: formatRunTime(run.createdAt),
     startedAt: run.createdAt,
     subtasks: [],
-    logs: []
+    logs: [],
+    chat: []
   };
   const task = run.events.reduce(reduceTask, base);
   // На случай, если журнал оборвался без итогового события.

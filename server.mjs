@@ -25,7 +25,7 @@ server.on('error', error => {
 server.listen(config.port, '127.0.0.1', () => {
   console.log(`Pixel AI Office API: http://127.0.0.1:${config.port}`);
   console.log(`Model: ${config.model}; provider: ${config.provider}; API key: ${config.apiKey ? 'configured' : 'not configured'}`);
-  console.log(`LLM: concurrency=${config.concurrency}, timeout=${config.timeoutMs} ms, agentMaxTokens=${config.agentMaxTokens}, agentShortMaxTokens=${config.agentShortMaxTokens}, router=${config.routerMode}, ceoSummary=${config.ceoSummary}, handoff=${config.handoff}${config.provider === 'ollama' ? `, think=${config.ollamaThink}, num_ctx=${config.ollamaNumCtx}` : ''}`);
+  console.log(`LLM: concurrency=${config.concurrency}, timeout=${config.timeoutMs} ms, agentMaxTokens=${config.agentMaxTokens}, agentShortMaxTokens=${config.agentShortMaxTokens}, router=${config.routerMode}, ceoSummary=${config.ceoSummary}, handoff=${config.handoff}, crossTalk=${config.crossTalk}${config.provider === 'ollama' ? `, think=${config.ollamaThink}, num_ctx=${config.ollamaNumCtx}` : ''}`);
   console.log(config.allowLan
     ? 'Доступ из локальной сети: включён (OFFICE_ALLOW_LAN=true). Любой в этой сети может ставить задачи офису.'
     : 'Доступ: только с этого компьютера (npm run dev:lan — открыть для локальной сети).');

@@ -96,6 +96,13 @@
 .agent-draft .draft-cursor { animation: draft-blink 1s steps(1) infinite; }
 @keyframes draft-blink { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .agent-draft .draft-cursor { animation: none; } }
+.agent-result .result-handoff { margin: 6px 0 0; font-size: .75rem; opacity: .72; }
+.team-chat { margin-top: 13px; padding: 10px 13px; border-left: 3px solid rgba(56, 146, 103, .45); border-radius: 0 9px 9px 0; background: rgba(132, 142, 130, .06); }
+.team-chat h3 { margin: 0 0 6px; font-size: .77rem; text-transform: uppercase; letter-spacing: .08em; opacity: .7; }
+.chat-line { display: grid; grid-template-columns: 43px minmax(75px, max-content) 1fr; gap: 9px; padding: 5px 0; font-size: .78rem; line-height: 1.45; }
+.chat-line time { opacity: .58; font-variant-numeric: tabular-nums; }
+.chat-line strong { font-weight: 650; color: #389267; }
+.chat-line span { overflow-wrap: anywhere; }
 .agent-result .result-warning { margin: 6px 0 0; font-size: .75rem; color: #9a5b2c; }
 .agent-result pre, .final-result pre {
   margin: 8px 0 0;
@@ -120,6 +127,8 @@
   .task-title-line { flex-direction: column; }
   .log-entry { grid-template-columns: 40px 1fr; gap: 5px 8px; }
   .log-entry span { grid-column: 2; }
+  .chat-line { grid-template-columns: 40px 1fr; gap: 3px 8px; }
+  .chat-line span { grid-column: 2; }
   .mini-status { font-size: .62rem; }
   .prompt-meta { align-items: flex-start; }
 }

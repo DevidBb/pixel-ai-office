@@ -46,6 +46,17 @@ export type OfficeSubtask = {
   stats?: ModelStats;
   /** Имена других сотрудников, упомянутые в ответе этого агента. */
   foreign?: string[];
+  /** Сотрудники, чьи результаты агент получил как входные данные (HANDOFF). */
+  handoffFrom?: string[];
+};
+
+/** Реплика сотрудника коллеге (CROSS_TALK) — не результат и не часть итога. */
+export type OfficeChat = {
+  id: string;
+  time: string;
+  agentId: string;
+  to?: string;
+  text: string;
 };
 
 export type OfficeTask = {
@@ -57,6 +68,8 @@ export type OfficeTask = {
   planSummary?: string;
   subtasks?: OfficeSubtask[];
   logs?: OfficeLog[];
+  /** Реплики команды после работы (событие agent-chat). */
+  chat?: OfficeChat[];
   result?: string;
   /** Номер задачи на сервере (/api/runs/:id) — по нему страница переподключается после перезагрузки. */
   runId?: string;
@@ -85,6 +98,9 @@ export type RunEvent = {
   stats?: ModelStats;
   foreign?: string[];
   text?: string;
+  /** agent-chat: кому адресована реплика. */
+  to?: string;
+  handoffFrom?: string[];
 };
 
 /** Задача из GET /api/runs/:id. */

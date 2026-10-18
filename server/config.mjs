@@ -62,6 +62,9 @@ export function readConfig(env = process.env) {
     // Передача результата между зависимыми сотрудниками (research → product → creator/sales → finance).
     // auto: только для ролевых заданий и при LLM_CONCURRENCY=1 (см. handoffEnabled в office.mjs); true — всегда; false — никогда.
     handoff: ['', 'auto'].includes((env.HANDOFF ?? '').trim().toLowerCase()) ? 'auto' : envBool(env, 'HANDOFF', false),
+    // Короткий раунд реплик коллегам после работы. По умолчанию выключен: +1 вызов модели на сотрудника.
+    crossTalk: envBool(env, 'CROSS_TALK', false),
+    crossTalkMaxTokens: envInt(env, 'CROSS_TALK_MAX_TOKENS', 80, 20),
     maxAgents: Math.min(envInt(env, 'MAX_AGENTS', 5, 1), 5),
     ollamaThink: envBool(env, 'OLLAMA_THINK', false),
     ollamaNumCtx: envInt(env, 'OLLAMA_NUM_CTX', 4096, 512),

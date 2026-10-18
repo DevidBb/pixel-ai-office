@@ -138,6 +138,10 @@ export default function App() {
         : assigned.has(agent.id) ? agent : { ...agent, status: 'idle', task: 'Не назначен в этой задаче' }));
     } else if (event.type === 'agent-start' && event.agentId && event.title) {
       updateAgent(event.agentId, agent => ({ ...agent, task: event.title!, status: 'working' }));
+    } else if (event.type === 'agent-chat' && event.agentId && event.text) {
+      // Реплика видна и на сцене — в подписи сотрудника.
+      const to = initialAgents.find(agent => agent.id === event.to)?.name;
+      updateAgent(event.agentId, agent => ({ ...agent, task: `${to ? `→ ${to}: ` : ''}${event.text}` }));
     } else if (event.type === 'review-start') {
       updateAgent('ceo', agent => ({ ...agent, status: 'thinking', task: event.message || 'Проверяет результаты команды' }));
     } else if (event.type === 'done') {
@@ -406,10 +410,16 @@ export default function App() {
                       </div>}
                       {subtask.result && <div className="agent-result">
                         <strong>Результат {agent?.name || subtask.agentId}{subtask.stats ? <small className="result-stats"> · {formatStats(subtask.stats)}</small> : null}</strong>
+                        {(subtask.handoffFrom || []).length > 0 && <p className="result-handoff">↳ Использованы данные от {subtask.handoffFrom!.map(id => agents.find(item => item.id === id)?.name || id).join(', ')}.</p>}
                         {(subtask.foreign || []).length > 0 && <p className="result-warning">⚠ В ответе упомянуты {subtask.foreign!.join(', ')}. Это текст {agent?.name}, а не их результаты.</p>}
                         <pre>{subtask.result}</pre>
                       </div>}
                     </details>;
+                  })}</div>}
+                  {(task.chat || []).length > 0 && <div className="team-chat"><h3>Обсуждение команды</h3>{task.chat!.map(line => {
+                    const agent = agents.find(item => item.id === line.agentId);
+                    const to = agents.find(item => item.id === line.to);
+                    return <div className="chat-line" key={line.id}><time>{line.time}</time><strong>{agent?.name || line.agentId}{to ? ` → ${to.name}` : ''}</strong><span>{line.text}</span></div>;
                   })}</div>}
                   {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
                   {(task.logs || []).length > 0 && <details className="collaboration-log"><summary>Журнал действий ({task.logs!.length})</summary><div className="log-entries">{task.logs!.map(log => {
