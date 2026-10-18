@@ -398,6 +398,10 @@ test('запрет после «всей команды» про другого 
   assert.deepEqual(route.excluded, ['research']);
   assert.deepEqual(routeByRules('Всех сотрудников не нужно исключать, придумай слоган').agentIds, ALL);
   assert.deepEqual(routeByRules('Всю команду не надо ограничивать, придумай слоган').agentIds, ALL);
+  for (const goal of ['Всех сотрудников исключать не нужно, придумай слоган', 'Всех сотрудников отключать не надо, придумай слоган',
+    'Всю команду исключать не нужно, придумай слоган', 'Всю команду не нужно отключать, придумай слоган']) {
+    assert.deepEqual(routeByRules(goal).agentIds, ALL, goal);
+  }
   assert.deepEqual(routeByRules('Не надо торопиться и подключи всю команду: придумай слоган').agentIds, ALL);
 });
 

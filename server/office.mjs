@@ -72,7 +72,10 @@ const NEGATION_BEFORE = new RegExp(
 // Во вставке нет имён, союзов и положительных глаголов: в «Не подключай Luma 2 и поработайте всей командой»
 // и «Не используй клише подключи всех специалистов» «не» относится к другому.
 const POSITIVE_VERB = String.raw`(?:подключи|задействуй|привлеки|позови|возьми|назначь|используй|работай|поработай)(?:те)?`;
-const WHOLE_TEAM_WORD = String.raw`\s+(?!(?:luma|люма|и|а|но|или|пусть|лучше|${POSITIVE_VERB})(?!\p{L}))[\p{L}-]+`;
+// «Исключать не нужно» — двойное отрицание, не отказ.
+const UNDO_VERB = String.raw`(?:исключать|отключать|убирать|ограничивать)`;
+const gapWord = (stop = '') => String.raw`\s+(?!(?:luma|люма|и|а|но|или|пусть|лучше|${POSITIVE_VERB}${stop})(?!\p{L}))[\p{L}-]+`;
+const WHOLE_TEAM_WORD = gapWord();
 const WHOLE_TEAM_GAP = String.raw`(?:${POLITE}|${WHOLE_TEAM_WORD}){0,4}`;
 // «Не подключай всех специалистов», «Не всех», «Не нужно, пожалуйста, всех сотрудников».
 const WHOLE_TEAM_NEGATED_BEFORE = new RegExp(
@@ -82,7 +85,7 @@ const WHOLE_TEAM_NEGATED_BEFORE = new RegExp(
 // «Всех сотрудников, пожалуйста, не зовите», «Всех лучше не подключай», «…подключать не требуется».
 // Через союз или с именем после глагола запрет относится к другому («…и не зови Luma 2»), «не нужно исключать» — не отказ.
 const WHOLE_TEAM_NEGATED_AFTER = new RegExp(
-  String.raw`^(?:${POLITE}|\s+лучше|${WHOLE_TEAM_WORD}){0,2}?\s+не\s+(?:` +
+  String.raw`^(?:${POLITE}|\s+лучше|${gapWord(`|${UNDO_VERB}`)}){0,2}?\s+не\s+(?:` +
   String.raw`(?:подключай|привлекай|задействуй|используй|назначай|включай|добавляй|приглашай|зови|бери|трогай|ставь)(?:те)?(?!\p{L})(?!\s+(?:luma|люма)(?!\p{L}))` +
   String.raw`|(?:нуж(?:ен|на|ны)|требуется)(?!\p{L})` +
   String.raw`|(?:надо|нужно|стоит)(?=\s*(?:$|[,.;:!?]|(?:подключать|привлекать|задействовать|использовать|назначать|включать|добавлять|приглашать|звать|брать|трогать)(?!\p{L}))))`,
@@ -92,7 +95,8 @@ const WHOLE_TEAM_NEGATED_AFTER = new RegExp(
 const CLAUSE_SPLIT = /[,.;:!?\n—–]|(?<!\p{L})(?:и|а|но|или|либо)(?!\p{L})/iu;
 const POLITE_INSERT = new RegExp(POLITE, 'giu');
 // «Не забудь», «не стесняйся», «не нужно исключать» — по смыслу не отказ.
-const NOT_A_REFUSAL = /(?<!\p{L})не\s+(?:забудь|забудьте|забывай|забывайте|стесняйся|стесняйтесь|(?:надо|нужно|стоит)\s+(?:исключать|ограничивать))(?!\p{L})/giu;
+const NOT_A_REFUSAL = new RegExp(String.raw`(?<!\p{L})(?:не\s+(?:забудь|забудьте|забывай|забывайте|стесняйся|стесняйтесь|(?:надо|нужно|стоит)\s+${UNDO_VERB})` +
+  String.raw`|${UNDO_VERB}\s+не\s+(?:надо|нужно|стоит))(?!\p{L})`, 'giu');
 const CLAUSE_NEGATION = /(?<!\p{L})(?:не|ни|нет)(?!\p{L})/iu;
 
 function wholeTeamClauseNegated(goal, start, end) {
@@ -100,6 +104,7 @@ function wholeTeamClauseNegated(goal, start, end) {
   const after = goal.slice(end).replace(POLITE_INSERT, ' ').split(CLAUSE_SPLIT)[0];
   return CLAUSE_NEGATION.test(`${before} ${after}`.replace(NOT_A_REFUSAL, ' '));
 }
+
 // «Не»/«без» в том же фрагменте, но не распознанное как запрет — сотрудник остаётся, а CEO предупреждает.
 const UNCERTAIN_NEGATION = /(?<!\p{L})(?:не|без)(?!\p{L})[^,;.:!?\n]*$/iu;
 // После имени: «Luma 2 не нужен», «Luma 5 не участвует», «Luma 4 не нужно», «Luma 3 не надо подключать»,
