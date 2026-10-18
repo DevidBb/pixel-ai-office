@@ -59,7 +59,11 @@ test('callModel: отмена клиентом обрывает запрос и 
     const controller = new AbortController();
     const first = callModel(messages, { signal: controller.signal, label: 'first' });
     const second = callModel(messages, { signal: controller.signal, label: 'queued' });
-    await new Promise(resolve => setTimeout(resolve, 50));
+    // Ждём, пока первый запрос дойдёт до модели: фиксированной паузы под нагрузкой не хватало,
+    // отмена приходила раньше запроса и проверка видела 0 запросов вместо 1.
+    const deadline = Date.now() + 2_000;
+    while (stub.state.requests < 1 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(stub.state.requests, 1, 'первый запрос дошёл до модели');
     assert.equal(limiter.waiting, 1);
     controller.abort(new Error('client closed'));
     await assert.rejects(first, /отменён/);
