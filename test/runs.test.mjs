@@ -243,6 +243,24 @@ test('после перезапуска новые события получаю
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
+test('падение до записи на диск: события после восстановления получают номера больше всех, что мог видеть клиент', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    const store = new RunStore({ dataDir, persistDelayMs: 60_000 });
+    const run = store.create(COFFEE_GOAL);
+    store.emit(run, 'final', { result: 'отчёт' });
+    // Эти события клиент уже получил, а на диск они не попали (сервер «упал» до отложенной записи).
+    for (let i = 0; i < 5; i++) store.emit(run, 'agent-status', { agentId: 'research', status: 'thinking', task: 'Пишет коллеге' });
+    const clientSeen = run.events.at(-1).seq;
+    const loaded = new RunStore({ dataDir }).get(run.id);
+    assert.equal(loaded.status, 'done');
+    const resumed = [];
+    store.subscribe(loaded, clientSeen, event => resumed.push(event?.type ?? 'END'));
+    assert.deepEqual(resumed.slice(-2), ['done', 'END']);
+    store.flush();
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('итог (final) сразу пишется на диск: перезапуск сразу после него не теряет отчёт', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
   try {

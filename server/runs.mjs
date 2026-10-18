@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { diag } from './llm.mjs';
 
 const FINISHED = new Set(['done', 'error', 'cancelled', 'interrupted']);
+// За persistDelayMs событий намного меньше: запас номеров после перезапуска.
+const RESTART_SEQ_GAP = 1000;
 
 /**
  * Задачи, которые живут на сервере независимо от вкладки браузера.
@@ -24,6 +26,9 @@ export class RunStore {
       try {
         const saved = JSON.parse(readFileSync(join(this.dir, file), 'utf8'));
         const run = this.hydrate(saved);
+        // До падения клиент мог получить события, которые не успели попасть на диск (запись отложена на persistDelayMs).
+        // События восстановления нумеруем с запасом, чтобы переподключение с ?after их не пропустило.
+        run.seqFloor = (run.events.at(-1)?.seq || 0) + RESTART_SEQ_GAP;
         // Перезапуск после готового итога оборвал только обсуждение команды (CROSS_TALK): задача завершена.
         if (!FINISHED.has(run.status) && this.hasFinal(run)) {
           this.finishAfterFinal(run, 'Обсуждение команды прервано перезапуском сервера. Итоговый отчёт сохранён.');
@@ -70,7 +75,7 @@ export class RunStore {
   push(run, type, payload = {}) {
     // Номер — от последнего, а не от длины: после перезапуска черновиков (agent-delta) в журнале меньше,
     // и по длине новые события получили бы уже занятые номера (переподключение с ?after их бы пропустило).
-    const event = { seq: (run.events.at(-1)?.seq || 0) + 1, at: Date.now(), type, ...payload };
+    const event = { seq: Math.max(run.events.at(-1)?.seq || 0, run.seqFloor || 0) + 1, at: Date.now(), type, ...payload };
     run.events.push(event);
     run.updatedAt = new Date(event.at).toISOString();
     for (const subscriber of run.subscribers) subscriber(event);

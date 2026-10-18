@@ -20,7 +20,7 @@ test('cleanChatReply: заглушки «OK», пустота и <think> отф�
   }
   assert.equal(cleanChatReply(undefined, 'sales', ALL), null);
   // Обращение по имени (его требует подсказка) не делает заглушку репликой.
-  for (const stub of ['Luma 3, согласен.', 'Luma 2, нет замечаний.', 'Luma 2: OK!', 'Luma 6 — спасибо', 'Люма 4, хорошо', 'Luma 2, OK, согласен.']) {
+  for (const stub of ['Luma 3, согласен.', 'Luma 2, нет замечаний.', 'Luma 2: OK!', 'Luma 6 — спасибо', 'Люма 4, хорошо', 'Luma 2, OK, согласен.', '**Luma 3**, хорошо.', '*Luma №3*: ок']) {
     assert.equal(cleanChatReply(stub, 'sales', ALL), null, stub);
   }
   assert.deepEqual(cleanChatReply('Luma 3, согласен, но латте дороже 3 €.', 'sales', ALL), { text: 'Luma 3, согласен, но латте дороже 3 €.', to: 'product' });
