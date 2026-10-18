@@ -138,13 +138,21 @@ test('buildReportMarkdown: определения ссылок из ответо
   assert.match(md, /^> \\\[1\]: https:\/\/example\.org\/a$/m, 'адрес виден как текст');
   assert.match(md, /^> {3}\\\[1\]: https:\/\/example\.org\/b "b"$/m);
   assert.match(md, /^> Источник \[1\]$/m, 'ссылки в тексте не тронуты');
-  // Любая строка, похожая на определение, — текстом: во вложенной цитате, в пункте и продолжении списка,
-  // после кода в списке. В блоке кода тоже (цена простоты — видимый «\»), зато общих ссылок нет никогда.
+  // Строка, похожая на определение, — текстом: во вложенной цитате, в пункте и продолжении списка, после кода
+  // в списке. Внутри блоков кода (и после маркера списка: «- ```js») ничего не меняется.
   const md2 = buildReportMarkdown({ ...baseTask, subtasks: [{ id: 's', agentId: 'creator', title: 'X', objective: 'о', status: 'done',
-    result: '> [3]: https://example.org/quote\n- [4]: https://example.org/list\n1. Источники:\n\n    [5]: https://example.org/cont\n- ```js\n  x = 1\n  ```\n\n[6]: https://example.org/after\n```\n[7]: https://example.org/code\n```' }] }, team);
-  for (const [n, prefix] of [[3, '> > '], [4, '> - '], [5, '> {5}'], [6, '> '], [7, '> ']]) {
+    result: '> [3]: https://example.org/quote\n- [4]: https://example.org/list\n1. Источники:\n\n    [5]: https://example.org/cont\n- ```js\n  x = 1\n  ```\n\n[6]: https://example.org/after\n```ts\ntype Rates = {\n  [currency: string]: number;\n};\n```\n> ```md\n> [7]: https://example.org/code\n> ```' }] }, team);
+  for (const [n, prefix] of [[3, '> > '], [4, '> - '], [5, '> {5}'], [6, '> ']]) {
     assert.match(md2, new RegExp(`^${prefix}\\\\\\[${n}\\]: https://`, 'm'), `[${n}]`);
   }
+  assert.match(md2, /^> {3}\[currency: string\]: number;$/m, 'код TypeScript без изменений');
+  assert.match(md2, /^> > \[7\]: https:\/\/example\.org\/code$/m, 'пример Markdown в блоке кода без изменений');
+  // «```пример```» в строке — не начало блока; «```js» внутри блока — не его конец.
+  const md3 = buildReportMarkdown({ ...baseTask, subtasks: [{ id: 's', agentId: 'creator', title: 'X', objective: 'о', status: 'done',
+    result: 'См. ```пример```\n[8]: https://example.org/inline\n```md\n```js\n[9]: https://example.org/code\n```\n\n[10]: https://example.org/source' }] }, team);
+  assert.match(md3, /^> \\\[8\]: /m);
+  assert.match(md3, /^> \[9\]: /m);
+  assert.match(md3, /^> \\\[10\]: /m);
   assert.ok(md.includes(`## План CEO\n\n\`\`\`\n${planSummary}\n\`\`\`\n`), 'многострочный план — блоком как есть');
 });
 

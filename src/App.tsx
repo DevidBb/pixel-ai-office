@@ -61,9 +61,9 @@ export default function App() {
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const [apiModel, setApiModel] = useState('');
   const [isRunning, setIsRunning] = useState(false);
-  // Итог экспорта под кнопками карточки: «Скопировано» на 2 с или понятная ошибка буфера обмена.
-  const [exportNote, setExportNote] = useState<{ taskId: string; kind: 'copied' | 'error'; text: string } | null>(null);
-  const exportNoteTimer = useRef<number | undefined>(undefined);
+  // Итог экспорта у каждой карточки свой: «Скопировано» на 2 с или понятная ошибка буфера обмена.
+  const [exportNotes, setExportNotes] = useState<Record<string, { kind: 'copied' | 'error'; text: string }>>({});
+  const exportNoteTimers = useRef(new Map<string, number>());
 
   useEffect(() => {
     let cancelled = false;
@@ -249,10 +249,13 @@ export default function App() {
     promptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
-  function showExportNote(note: NonNullable<typeof exportNote>, ms: number) {
-    window.clearTimeout(exportNoteTimer.current);
-    setExportNote(note);
-    exportNoteTimer.current = window.setTimeout(() => setExportNote(null), ms);
+  function showExportNote(taskId: string, note: { kind: 'copied' | 'error'; text: string }, ms: number) {
+    window.clearTimeout(exportNoteTimers.current.get(taskId));
+    setExportNotes(current => ({ ...current, [taskId]: note }));
+    exportNoteTimers.current.set(taskId, window.setTimeout(() => {
+      exportNoteTimers.current.delete(taskId);
+      setExportNotes(({ [taskId]: _gone, ...rest }) => rest);
+    }, ms));
   }
 
   async function copyReport(task: OfficeTask) {
@@ -260,9 +263,9 @@ export default function App() {
       // Буфер обмена есть только в защищённом контексте (localhost или https) и с разрешения браузера.
       if (!navigator.clipboard?.writeText) throw new Error('no clipboard');
       await navigator.clipboard.writeText(buildReportMarkdown(task, initialAgents));
-      showExportNote({ taskId: task.id, kind: 'copied', text: 'Скопировано' }, 2000);
+      showExportNote(task.id, { kind: 'copied', text: 'Скопировано' }, 2000);
     } catch {
-      showExportNote({ taskId: task.id, kind: 'error', text: 'Браузер не дал доступ к буферу обмена (нужен localhost или https и разрешение). Скачайте .md.' }, 8000);
+      showExportNote(task.id, { kind: 'error', text: 'Браузер не дал доступ к буферу обмена (нужен localhost или https и разрешение). Скачайте .md.' }, 8000);
     }
   }
 
@@ -422,9 +425,9 @@ export default function App() {
                   {!RUNNING_STATUSES.includes(task.status) && <div className="task-actions">
                     <button type="button" onClick={() => repeatTask(task)} disabled={isRunning} title="Подставить текст задачи в поле, чтобы запустить заново">Повторить</button>
                     <button type="button" onClick={() => void deleteTask(task)} title="Удалить из истории в браузере и на сервере">Удалить</button>
-                    <button type="button" onClick={() => void copyReport(task)} title="Скопировать отчёт в Markdown: задача, план, результаты, итог">{exportNote?.taskId === task.id && exportNote.kind === 'copied' ? 'Скопировано' : 'Копировать'}</button>
+                    <button type="button" onClick={() => void copyReport(task)} title="Скопировать отчёт в Markdown: задача, план, результаты, итог">{exportNotes[task.id]?.kind === 'copied' ? 'Скопировано' : 'Копировать'}</button>
                     <button type="button" onClick={() => downloadReport(task)} title="Скачать отчёт файлом .md">Скачать .md</button>
-                    {exportNote?.taskId === task.id && exportNote.kind === 'error' && <span className="export-note" role="alert">{exportNote.text}</span>}
+                    {exportNotes[task.id]?.kind === 'error' && <span className="export-note" role="alert">{exportNotes[task.id].text}</span>}
                   </div>}
                   {task.planSummary && <div className="plan-summary"><strong>План CEO</strong><p>{task.planSummary}</p></div>}
                   {(task.subtasks || []).length > 0 && <div className="subtask-list"><h3>Назначенные подзадачи</h3>{task.subtasks!.map(subtask => {
