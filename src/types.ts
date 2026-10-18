@@ -41,6 +41,8 @@ export type OfficeSubtask = {
   objective: string;
   status: SubtaskStatus;
   result?: string;
+  /** Текст, который сотрудник пишет прямо сейчас (до agent-result). */
+  draft?: string;
   stats?: ModelStats;
   /** Имена других сотрудников, упомянутые в ответе этого агента. */
   foreign?: string[];

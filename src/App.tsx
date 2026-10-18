@@ -41,6 +41,7 @@ type ApiEvent = {
   interrupted?: boolean;
   stats?: ModelStats;
   foreign?: string[];
+  text?: string;
 };
 
 function formatStats(stats?: ModelStats) {
@@ -183,11 +184,20 @@ export default function App() {
       if (event.title) updateAgent(event.agentId, agent => ({ ...agent, task: event.title!, status: 'working' }));
       return;
     }
+    if (event.type === 'agent-delta' && event.subtaskId && event.text) {
+      updateTask(taskId, task => ({
+        ...task,
+        subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId
+          ? { ...subtask, draft: (subtask.draft || '') + event.text }
+          : subtask)
+      }));
+      return;
+    }
     if (event.type === 'agent-result' && event.agentId && event.subtaskId) {
       updateTask(taskId, task => ({
         ...task,
         subtasks: (task.subtasks || []).map(subtask => subtask.id === event.subtaskId
-          ? { ...subtask, status: 'done', result: event.result || 'Агент вернул пустой результат.', stats: event.stats, foreign: event.foreign }
+          ? { ...subtask, status: 'done', result: event.result || 'Агент вернул пустой результат.', draft: undefined, stats: event.stats, foreign: event.foreign }
           : subtask)
       }));
       return;
@@ -447,6 +457,10 @@ export default function App() {
                     return <details className="subtask-card" key={subtask.id} open={subtask.status === 'working' || subtask.status === 'error'}>
                       <summary><span className={`subtask-indicator ${subtask.status}`} /><span className="subtask-heading"><strong>{agent ? `${agent.name} · ${agent.role}` : subtask.agentId}</strong><small>{subtask.title}</small></span><span className={`mini-status ${subtask.status}`}>{subtask.status === 'queued' ? 'В очереди' : subtask.status === 'working' ? 'Работает' : subtask.status === 'done' ? 'Готово' : 'Ошибка'}</span></summary>
                       <p className="subtask-objective">{subtask.objective}</p>
+                      {!subtask.result && subtask.draft && <div className="agent-result agent-draft" aria-live="polite">
+                        <strong>{agent?.name || subtask.agentId} пишет…</strong>
+                        <pre>{subtask.draft}<span className="draft-cursor">▍</span></pre>
+                      </div>}
                       {subtask.result && <div className="agent-result">
                         <strong>Результат {agent?.name || subtask.agentId}{subtask.stats ? <small className="result-stats"> · {formatStats(subtask.stats)}</small> : null}</strong>
                         {(subtask.foreign || []).length > 0 && <p className="result-warning">⚠ В ответе упомянуты {subtask.foreign!.join(', ')}. Это текст {agent?.name}, а не их результаты.</p>}

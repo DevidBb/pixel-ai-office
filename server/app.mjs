@@ -7,6 +7,8 @@ import {
   assertSomeoneAllowed, uncertainNote
 } from './office.mjs';
 
+const DELTA_INTERVAL_MS = 300;
+
 function sendJson(res, status, value) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(value));
@@ -138,11 +140,24 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
       const outcomes = await Promise.all(plan.tasks.map(async task => {
         const agent = AGENTS.find(a => a.id === task.agentId);
         const agentStarted = { at: 0 };
+        // Текст по мере написания: копим кусочки и отправляем не чаще раза в DELTA_INTERVAL_MS.
+        let pending = '';
+        let lastDeltaAt = 0;
+        const flushDelta = () => {
+          if (!pending) return;
+          safeEmit('agent-delta', { agentId: agent.id, subtaskId: task.id, text: pending });
+          pending = '';
+          lastDeltaAt = Date.now();
+        };
         try {
           const { text: result, stats } = await callModel(agentMessages(agent, task, plan), {
             maxTokens: task.maxTokens,
             signal,
             label: `${runId}/${agent.id}`,
+            onToken: piece => {
+              pending += piece;
+              if (Date.now() - lastDeltaAt >= DELTA_INTERVAL_MS) flushDelta();
+            },
             onStart: () => {
               agentStarted.at = Date.now();
               startedCount++;
@@ -152,6 +167,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
             }
           });
           if (cancelled()) return null;
+          flushDelta();
           const seconds = Math.round((Date.now() - agentStarted.at) / 1000);
           const foreign = foreignAttributions(agent.id, result);
           safeEmit('agent-result', { agentId: agent.id, subtaskId: task.id, result, stats, foreign });
