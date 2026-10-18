@@ -34,6 +34,11 @@ type ApiEvent = {
   title?: string;
   result?: string;
   kind?: OfficeLog['kind'];
+  /** Порядковый номер и время события задачи на сервере (/api/runs). */
+  seq?: number;
+  at?: number;
+  cancelled?: boolean;
+  interrupted?: boolean;
   stats?: ModelStats;
   foreign?: string[];
 };
@@ -58,13 +63,18 @@ function loadSavedTasks(): OfficeTask[] {
   }
 }
 
-function clockNow() {
-  return new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+function clockNow(at?: number) {
+  return new Date(at ?? Date.now()).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
 
-function makeLog(agentId: string, message: string, kind?: OfficeLog['kind']): OfficeLog {
-  return { id: crypto.randomUUID(), time: clockNow(), agentId, message, kind };
+function makeLog(agentId: string, message: string, kind?: OfficeLog['kind'], at?: number): OfficeLog {
+  return { id: crypto.randomUUID(), time: clockNow(at), agentId, message, kind };
 }
+
+const RUNNING_STATUSES: TaskStatus[] = ['planning', 'working', 'review'];
+const RECONNECT_DELAY_MS = 2_000;
+const RECONNECT_ATTEMPTS = 30;
+const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
 export default function App() {
   const gameHost = useRef<HTMLDivElement>(null);
@@ -143,13 +153,13 @@ export default function App() {
     setAgents(current => current.map(agent => agent.id === agentId ? updater(agent) : agent));
   }
 
-  function addLog(taskId: string, agentId: string, message: string, kind?: OfficeLog['kind']) {
-    updateTask(taskId, task => ({ ...task, logs: [...(task.logs || []), makeLog(agentId, message, kind)] }));
+  function addLog(taskId: string, agentId: string, message: string, kind?: OfficeLog['kind'], at?: number) {
+    updateTask(taskId, task => ({ ...task, logs: [...(task.logs || []), makeLog(agentId, message, kind, at)] }));
   }
 
   function handleApiEvent(taskId: string, event: ApiEvent) {
     if (event.type === 'log' && event.agentId && event.message) {
-      addLog(taskId, event.agentId, event.message, event.kind);
+      addLog(taskId, event.agentId, event.message, event.kind, event.at);
       return;
     }
     if (event.type === 'agent-status' && event.agentId && event.status) {
@@ -210,14 +220,92 @@ export default function App() {
     }
     if (event.type === 'error') {
       const message = event.message || 'Неизвестная ошибка.';
-      updateTask(taskId, task => ({ ...task, status: 'error', result: `Выполнение остановлено: ${message}` }));
-      addLog(taskId, 'ceo', `Ошибка: ${message}`, 'warning');
+      updateTask(taskId, task => ({ ...task, status: 'error', result: event.cancelled || event.interrupted ? message : `Выполнение остановлено: ${message}` }));
+      addLog(taskId, 'ceo', `Ошибка: ${message}`, 'warning', event.at);
       updateAgent('ceo', agent => ({ ...agent, status: 'error', task: 'Нужна проверка ошибки' }));
       setIsRunning(false);
       activeTaskRef.current = null;
       abortRef.current = null;
     }
   }
+
+  function finishLocally(taskId: string) {
+    if (activeTaskRef.current !== taskId) return;
+    setIsRunning(false);
+    activeTaskRef.current = null;
+    abortRef.current = null;
+  }
+
+  /**
+   * Подключается к задаче на сервере и проигрывает все её события с начала.
+   * Задача живёт на сервере, поэтому после перезагрузки страницы или обрыва связи
+   * достаточно подключиться заново: состояние задачи и сотрудников собирается из событий.
+   */
+  async function followRun(taskId: string, runId: string, token = { cancelled: false }) {
+    activeTaskRef.current = taskId;
+    setIsRunning(true);
+    for (let attempt = 0; attempt <= RECONNECT_ATTEMPTS; attempt++) {
+      if (token.cancelled || activeTaskRef.current !== taskId) return;
+      const controller = new AbortController();
+      abortRef.current = controller;
+      updateTask(taskId, task => ({ ...task, status: 'planning', planSummary: undefined, subtasks: [], logs: [], result: undefined }));
+      setAgents(initialAgents);
+      try {
+        const response = await fetch(`/api/runs/${runId}/events?after=0`, { signal: controller.signal });
+        if (response.status === 404) {
+          updateTask(taskId, task => ({ ...task, status: 'error', result: 'Задача не найдена на сервере: история очищена или задача старше последних 50.' }));
+          finishLocally(taskId);
+          return;
+        }
+        if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        const consumeBlock = (block: string) => {
+          const dataLines = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim());
+          if (!dataLines.length) return;
+          try { handleApiEvent(taskId, JSON.parse(dataLines.join('\n')) as ApiEvent); } catch { /* ignore malformed event */ }
+        };
+        while (true) {
+          const { value, done } = await reader.read();
+          buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+          let separator = buffer.indexOf('\n\n');
+          while (separator >= 0) {
+            consumeBlock(buffer.slice(0, separator));
+            buffer = buffer.slice(separator + 2);
+            separator = buffer.indexOf('\n\n');
+          }
+          if (done) break;
+        }
+        if (buffer.trim()) consumeBlock(buffer);
+        // done/error уже сняли activeTaskRef — задача завершена.
+        if (activeTaskRef.current !== taskId) return;
+      } catch {
+        if (token.cancelled || controller.signal.aborted || activeTaskRef.current !== taskId) return;
+      }
+      // Связь оборвалась, а задача на сервере продолжается: переподключаемся.
+      await sleep(RECONNECT_DELAY_MS);
+    }
+    updateTask(taskId, task => ({ ...task, status: 'error', result: task.result || 'Нет связи с сервером. Задача, возможно, продолжается — обнови страницу позже.' }));
+    finishLocally(taskId);
+  }
+
+  // После перезагрузки страницы: подключиться к незавершённой задаче на сервере.
+  useEffect(() => {
+    const unfinished = tasks.find(task => RUNNING_STATUSES.includes(task.status));
+    if (!unfinished) return;
+    if (unfinished.runId) {
+      // В StrictMode эффект запускается дважды: очистка обрывает первое подключение, второе начинает заново.
+      const token = { cancelled: false };
+      void followRun(unfinished.id, unfinished.runId, token);
+      return () => { token.cancelled = true; abortRef.current?.abort(); };
+    } else {
+      // Задача из старой версии (до /api/runs) жила в соединении и прервалась вместе со страницей.
+      updateTask(unfinished.id, task => ({ ...task, status: 'error', result: task.result || 'Задача была прервана перезагрузкой страницы.' }));
+    }
+    // Только при первом открытии страницы.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -234,74 +322,38 @@ export default function App() {
       logs: [makeLog('ceo', 'Задача принята. CEO готовит план и распределяет работу.')]
     };
     setTasks(current => [task, ...current]);
-    setAgents(current => current.map(agent => ({
-      ...agent,
-      status: agent.id === 'ceo' ? 'thinking' as const : 'idle' as const,
-      task: agent.id === 'ceo' ? 'Планирует работу' : 'Ждёт назначения'
-    })));
     setPrompt('');
     setIsRunning(true);
     activeTaskRef.current = taskId;
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     try {
-      const response = await fetch('/api/execute', {
+      const response = await fetch('/api/runs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ goal: title }),
-        signal: controller.signal
+        body: JSON.stringify({ goal: title })
       });
-      if (!response.ok) {
-        let message = `HTTP ${response.status}`;
-        try { const data = await response.json(); message = data.error || message; } catch { /* response may not be JSON */ }
-        throw new Error(message);
-      }
-      if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ. Попробуй обновить браузер.');
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      const consumeBlock = (block: string) => {
-        const dataLines = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim());
-        if (!dataLines.length) return;
-        try { handleApiEvent(taskId, JSON.parse(dataLines.join('\n')) as ApiEvent); } catch { /* ignore malformed event */ }
-      };
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        let separator = buffer.indexOf('\n\n');
-        while (separator >= 0) {
-          consumeBlock(buffer.slice(0, separator));
-          buffer = buffer.slice(separator + 2);
-          separator = buffer.indexOf('\n\n');
-        }
-        if (done) break;
-      }
-      if (buffer.trim()) consumeBlock(buffer);
-      if (activeTaskRef.current === taskId) {
-        updateTask(taskId, current => current.status === 'done' || current.status === 'error' ? current : ({ ...current, status: 'error', result: current.result || 'Соединение завершилось до получения итогового события. Попробуй открыть задачу снова.' }));
-        setIsRunning(false);
-        activeTaskRef.current = null;
-        abortRef.current = null;
-      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.runId) throw new Error(data.error || `HTTP ${response.status}`);
+      updateTask(taskId, current => ({ ...current, runId: data.runId }));
+      await followRun(taskId, data.runId);
     } catch (error) {
-      if (controller.signal.aborted) {
-        updateTask(taskId, current => ({ ...current, status: 'error', result: 'Задача была прервана.' }));
-      } else {
-        const message = error instanceof Error ? error.message : 'Неизвестная ошибка.';
-        updateTask(taskId, current => ({ ...current, status: 'error', result: `Не удалось выполнить задачу: ${message}` }));
-        addLog(taskId, 'ceo', `Ошибка выполнения: ${message}`, 'warning');
-      }
+      const message = error instanceof Error ? error.message : 'Неизвестная ошибка.';
+      updateTask(taskId, current => ({ ...current, status: 'error', result: `Не удалось выполнить задачу: ${message}` }));
+      addLog(taskId, 'ceo', `Ошибка выполнения: ${message}`, 'warning');
       updateAgent('ceo', agent => ({ ...agent, status: 'error', task: 'Не удалось завершить задачу' }));
-      setIsRunning(false);
-      activeTaskRef.current = null;
-      abortRef.current = null;
+      finishLocally(taskId);
     }
   }
 
-  function stopTask() {
+  async function stopTask() {
     const currentTaskId = activeTaskRef.current;
+    const runId = tasks.find(task => task.id === currentTaskId)?.runId;
+    // Сервер сам отправит событие об остановке; ждём его в текущем потоке.
+    if (runId) {
+      try {
+        await fetch(`/api/runs/${runId}/cancel`, { method: 'POST' });
+        return;
+      } catch { /* сервер недоступен — останавливаем локально */ }
+    }
     abortRef.current?.abort();
     if (currentTaskId) {
       updateTask(currentTaskId, task => ({ ...task, status: 'error', result: 'Выполнение остановлено пользователем.' }));

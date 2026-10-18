@@ -1,11 +1,18 @@
 import { loadEnv, readConfig } from './server/config.mjs';
 import { createModelClient } from './server/llm.mjs';
 import { createApp } from './server/app.mjs';
+import { RunStore } from './server/runs.mjs';
 
 loadEnv();
 const config = readConfig();
 const { callModel, limiter } = createModelClient(config);
-const server = createApp({ config, callModel, limiter });
+const runs = new RunStore({ dataDir: config.dataDir });
+const server = createApp({ config, callModel, limiter, runs });
+
+// Сохранить журналы задач перед выходом (Ctrl+C в npm run dev).
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => { runs.flush(); process.exit(0); });
+}
 
 server.on('error', error => {
   if (error.code === 'EADDRINUSE') {

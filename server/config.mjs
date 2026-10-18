@@ -37,6 +37,8 @@ export function readConfig(env = process.env) {
   const temperature = Number(env.LLM_TEMPERATURE);
   return {
     port: Number(env.PORT || 8787),
+    // Задачи и их результаты (data/runs/*.json). Папка в .gitignore.
+    dataDir: env.DATA_DIR || resolve(rootDir, 'data'),
     model: env.OPENAI_MODEL || 'gpt-4.1-mini',
     baseUrl,
     apiKey: apiKey === 'replace_with_your_api_key' ? '' : apiKey,

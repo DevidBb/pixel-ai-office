@@ -56,4 +56,6 @@ export type OfficeTask = {
   subtasks?: OfficeSubtask[];
   logs?: OfficeLog[];
   result?: string;
+  /** Номер задачи на сервере (/api/runs/:id) — по нему страница переподключается после перезагрузки. */
+  runId?: string;
 };
