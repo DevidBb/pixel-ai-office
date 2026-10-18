@@ -116,7 +116,11 @@ export class RunStore {
   persistNow(run) {
     if (!this.dir) return;
     if (run.timer) { clearTimeout(run.timer); run.timer = null; }
-    const { id, goal, status, createdAt, updatedAt, events } = run;
+    const { id, goal, status, createdAt, updatedAt } = run;
+    // Черновики (agent-delta) нужны, пока сотрудник пишет; после его agent-result на диск их не пишем —
+    // итоговый текст и так в результате, а файл не раздувается сотнями кусочков.
+    const finishedAgents = new Set(run.events.filter(e => e.type === 'agent-result' || e.type === 'agent-error').map(e => e.agentId));
+    const events = run.events.filter(e => e.type !== 'agent-delta' || !finishedAgents.has(e.agentId));
     const file = join(this.dir, `${id}.json`);
     const tmp = `${file}.tmp`;
     try {

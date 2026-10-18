@@ -223,3 +223,21 @@ test('неизвестная задача → 404, пустая цель → 400
     assert.equal(bad.status, 400);
   } finally { close(); }
 });
+
+test('на диск черновики agent-delta пишутся, пока сотрудник не сдал результат', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    const store = new RunStore({ dataDir });
+    const run = store.create(COFFEE_GOAL);
+    store.emit(run, 'agent-delta', { agentId: 'creator', subtaskId: 'task-creator', text: 'Сло' });
+    store.emit(run, 'agent-delta', { agentId: 'finance', subtaskId: 'task-finance', text: '90' });
+    store.emit(run, 'agent-delta', { agentId: 'creator', subtaskId: 'task-creator', text: 'ган' });
+    store.emit(run, 'agent-result', { agentId: 'creator', subtaskId: 'task-creator', result: 'Слоган' });
+    store.persistNow(run);
+    const saved = JSON.parse(readFileSync(join(dataDir, 'runs', `${run.id}.json`), 'utf8'));
+    const deltas = saved.events.filter(e => e.type === 'agent-delta');
+    assert.deepEqual(deltas.map(e => e.agentId), ['finance'], 'черновик ещё пишущего сотрудника сохраняется');
+    assert.equal(saved.events.find(e => e.type === 'agent-result').result, 'Слоган');
+    assert.equal(run.events.filter(e => e.type === 'agent-delta').length, 3, 'в памяти журнал полный');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});

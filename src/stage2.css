@@ -92,6 +92,10 @@
 .subtask-objective { margin: 0; padding: 0 13px 12px 30px; font-size: .82rem; line-height: 1.5; opacity: .78; }
 .agent-result { margin: 0 12px 12px; padding: 12px; border-radius: 8px; background: rgba(132, 142, 130, .08); }
 .agent-result .result-stats { font-weight: 400; opacity: .7; }
+.agent-draft { opacity: .85; }
+.agent-draft .draft-cursor { animation: draft-blink 1s steps(1) infinite; }
+@keyframes draft-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .agent-draft .draft-cursor { animation: none; } }
 .agent-result .result-warning { margin: 6px 0 0; font-size: .75rem; color: #9a5b2c; }
 .agent-result pre, .final-result pre {
   margin: 8px 0 0;

@@ -49,11 +49,31 @@ function stripThinking(text) {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^\s*<think>[\s\S]*$/i, '').trim();
 }
 
-async function requestOllama(config, messages, { json, maxTokens, signal }) {
+/** Построчно читает тело ответа (NDJSON у Ollama, SSE у OpenAI) и вызывает onLine для каждой строки. */
+async function readLines(response, onLine) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    let index;
+    while ((index = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, index).trim();
+      buffer = buffer.slice(index + 1);
+      if (line) onLine(line);
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) onLine(buffer.trim());
+}
+
+async function requestOllama(config, messages, { json, maxTokens, signal, onChunk }) {
+  const stream = Boolean(onChunk);
   const body = {
     model: config.model,
     messages,
-    stream: false,
+    stream,
     think: config.ollamaThink,
     keep_alive: config.ollamaKeepAlive,
     options: { temperature: config.temperature, num_predict: maxTokens, num_ctx: config.ollamaNumCtx }
@@ -62,13 +82,27 @@ async function requestOllama(config, messages, { json, maxTokens, signal }) {
   const response = await fetch(`${config.ollamaUrl}/api/chat`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal
   });
-  const responseText = await response.text();
   let data;
-  try { data = JSON.parse(responseText); }
-  catch { data = null; }
-  if (!response.ok) {
-    const detail = data?.error || responseText.slice(0, 400) || `HTTP ${response.status}`;
-    throw new Error(`Ошибка Ollama (${response.status}): ${detail}`);
+  if (!response.ok || !stream) {
+    const responseText = await response.text();
+    try { data = JSON.parse(responseText); }
+    catch { data = null; }
+    if (!response.ok) {
+      const detail = data?.error || responseText.slice(0, 400) || `HTTP ${response.status}`;
+      throw new Error(`Ошибка Ollama (${response.status}): ${detail}`);
+    }
+  } else {
+    // Потоковый ответ: строка JSON на каждый кусок текста, последняя (done: true) несёт статистику.
+    let content = '';
+    await readLines(response, line => {
+      let part;
+      try { part = JSON.parse(line); } catch { return; }
+      if (part.error) throw new Error(`Ошибка Ollama: ${part.error}`);
+      const piece = part.message?.content || '';
+      if (piece) { content += piece; onChunk(piece); }
+      if (part.done) data = { ...part, message: { content } };
+    });
+    data ||= { message: { content } };
   }
   return {
     content: data?.message?.content,
@@ -83,21 +117,42 @@ async function requestOllama(config, messages, { json, maxTokens, signal }) {
   };
 }
 
-async function requestOpenAI(config, messages, { json, maxTokens, signal }) {
+async function requestOpenAI(config, messages, { json, maxTokens, signal, onChunk }) {
+  const stream = Boolean(onChunk);
   const headers = { 'content-type': 'application/json' };
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
   const body = { model: config.model, messages, temperature: config.temperature, max_completion_tokens: maxTokens };
   if (json) body.response_format = { type: 'json_object' };
+  if (stream) Object.assign(body, { stream: true, stream_options: { include_usage: true } });
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST', headers, body: JSON.stringify(body), signal
   });
-  const responseText = await response.text();
   let data;
-  try { data = JSON.parse(responseText); }
-  catch { data = null; }
-  if (!response.ok) {
-    const detail = data?.error?.message || responseText.slice(0, 400) || `HTTP ${response.status}`;
-    throw new Error(`Ошибка API (${response.status}): ${detail}`);
+  if (!response.ok || !stream) {
+    const responseText = await response.text();
+    try { data = JSON.parse(responseText); }
+    catch { data = null; }
+    if (!response.ok) {
+      const detail = data?.error?.message || responseText.slice(0, 400) || `HTTP ${response.status}`;
+      throw new Error(`Ошибка API (${response.status}): ${detail}`);
+    }
+  } else {
+    // SSE: «data: {choices:[{delta:{content}}]}», в конце usage и «data: [DONE]».
+    let content = '';
+    let finishReason;
+    let usage;
+    await readLines(response, line => {
+      if (!line.startsWith('data:')) return;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') return;
+      let part;
+      try { part = JSON.parse(payload); } catch { return; }
+      const piece = part.choices?.[0]?.delta?.content || '';
+      if (piece) { content += piece; onChunk(piece); }
+      finishReason = part.choices?.[0]?.finish_reason || finishReason;
+      usage = part.usage || usage;
+    });
+    data = { choices: [{ message: { content }, finish_reason: finishReason }], usage };
   }
   return {
     content: data?.choices?.[0]?.message?.content,
@@ -115,7 +170,7 @@ async function requestOpenAI(config, messages, { json, maxTokens, signal }) {
  */
 export function createModelClient(config, limiter = new Limiter(config.concurrency)) {
   let llmCallSeq = 0;
-  async function callModel(messages, { json = false, maxTokens = config.agentMaxTokens, timeoutMs = config.timeoutMs, signal, label = 'llm', onStart } = {}) {
+  async function callModel(messages, { json = false, maxTokens = config.agentMaxTokens, timeoutMs = config.timeoutMs, signal, label = 'llm', onStart, onToken } = {}) {
     const id = ++llmCallSeq;
     const queuedAt = Date.now();
     if (limiter.active >= limiter.max) diag(`[llm#${id}] ${label}: в очереди`, { waiting: limiter.waiting + 1 });
@@ -128,7 +183,18 @@ export function createModelClient(config, limiter = new Limiter(config.concurren
     try {
       onStart?.();
       const request = config.provider === 'ollama' ? requestOllama : requestOpenAI;
-      const { content, stats } = await request(config, messages, { json, maxTokens, signal: combined });
+      // onToken получает только видимый прирост текста: блоки <think>…</think> не показываем.
+      let raw = '';
+      let shown = '';
+      const onChunk = onToken && (piece => {
+        raw += piece;
+        const visible = stripThinking(raw);
+        if (visible.length > shown.length && visible.startsWith(shown)) {
+          onToken(visible.slice(shown.length));
+          shown = visible;
+        }
+      });
+      const { content, stats } = await request(config, messages, { json, maxTokens, signal: combined, onChunk });
       const text = typeof content === 'string' ? stripThinking(content) : '';
       const totalMs = Date.now() - startedAt;
       const tokPerSec = stats.genMs && stats.outputTokens ? +(stats.outputTokens / (stats.genMs / 1000)).toFixed(1) : undefined;

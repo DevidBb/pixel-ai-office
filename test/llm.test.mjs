@@ -81,3 +81,63 @@ test('callModel: ожидание в очереди ограничено LLM_QUE
     assert.equal(limiter.active, 0);
   } finally { stub.stop(); }
 });
+
+// Потоковые ответы: заглушка отдаёт текст кусками в формате Ollama (NDJSON) или OpenAI (SSE).
+async function startStreamStub(provider, chunks) {
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      const request = JSON.parse(body);
+      const write = line => new Promise(resolve => res.write(line, resolve));
+      if (provider === 'ollama') {
+        assert.equal(request.stream, true);
+        res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+        for (const piece of chunks) await write(JSON.stringify({ message: { content: piece }, done: false }) + '\n');
+        await write(JSON.stringify({ message: { content: '' }, done: true, eval_count: 7, eval_duration: 1e9, prompt_eval_count: 30, done_reason: 'stop' }) + '\n');
+      } else {
+        assert.equal(request.stream, true);
+        assert.deepEqual(request.stream_options, { include_usage: true });
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        for (const piece of chunks) await write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece } }] })}\n\n`);
+        await write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`);
+        await write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 30, completion_tokens: 7 } })}\n\n`);
+        await write('data: [DONE]\n\n');
+      }
+      res.end();
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const config = readConfig({ OPENAI_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`, OPENAI_MODEL: 'stub', LLM_PROVIDER: provider, OPENAI_API_KEY: 'test-key' });
+  return { config, stop: () => { server.closeAllConnections(); server.close(); } };
+}
+
+for (const provider of ['ollama', 'openai']) {
+  test(`callModel(${provider}) с onToken: текст приходит кусками, итог и статистика как без потока`, async () => {
+    const stub = await startStreamStub(provider, ['Кофе ', 'между ', 'парами']);
+    try {
+      const { callModel, limiter } = createModelClient(stub.config);
+      const pieces = [];
+      const { text, stats } = await callModel(messages, { label: 'stream', onToken: piece => pieces.push(piece) });
+      assert.equal(text, 'Кофе между парами');
+      assert.equal(pieces.join(''), 'Кофе между парами');
+      assert.ok(pieces.length >= 2, 'больше одного куска');
+      assert.equal(stats.outputTokens, 7);
+      assert.equal(stats.promptTokens, 30);
+      assert.equal(stats.doneReason, 'stop');
+      assert.equal(limiter.active, 0);
+    } finally { stub.stop(); }
+  });
+}
+
+test('callModel: блок <think> в потоке не показывается в onToken и не попадает в итог', async () => {
+  const stub = await startStreamStub('ollama', ['<think>считаю', ' варианты</think>', 'Слоган: ', '«Кофе между парами»']);
+  try {
+    const { callModel } = createModelClient(stub.config);
+    const pieces = [];
+    const { text } = await callModel(messages, { label: 'think', onToken: piece => pieces.push(piece) });
+    assert.equal(text, 'Слоган: «Кофе между парами»');
+    assert.ok(!pieces.join('').includes('think') && !pieces.join('').includes('считаю'));
+    assert.equal(pieces.join(''), 'Слоган: «Кофе между парами»');
+  } finally { stub.stop(); }
+});

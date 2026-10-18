@@ -281,3 +281,22 @@ test('POST /api/execute: нераспознанное «не» — предуп�
   assert.deepEqual(ofType(events, 'agent-start').map(e => e.agentId), ['creator']);
   assert.ok(ofType(events, 'log').some(e => e.agentId === 'ceo' && e.kind === 'warning' && /Проверь: рядом с Luma 4/.test(e.message)));
 });
+
+test('POST /api/execute: текст сотрудника приходит событиями agent-delta до agent-result', async () => {
+  const limiter = new Limiter(1);
+  async function callModel(messages, opts) {
+    await limiter.acquire(opts.signal, 5_000);
+    try {
+      opts.onStart?.();
+      for (const piece of ['Слоган: ', '«Кофе ', 'между парами»']) opts.onToken?.(piece);
+      return { text: 'Слоган: «Кофе между парами»', stats: { outputTokens: 6 } };
+    } finally { limiter.release(); }
+  }
+  const events = await execute(SLOGAN_GOAL, { callModel, limiter });
+  const deltas = ofType(events, 'agent-delta');
+  assert.ok(deltas.length >= 2, 'первый кусок сразу, остаток — перед результатом');
+  assert.ok(deltas.every(e => e.agentId === 'creator' && e.subtaskId === 'task-creator'));
+  assert.equal(deltas.map(e => e.text).join(''), 'Слоган: «Кофе между парами»');
+  const resultIndex = events.findIndex(e => e.type === 'agent-result');
+  assert.ok(events.indexOf(deltas.at(-1)) < resultIndex);
+});
