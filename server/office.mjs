@@ -1,4 +1,5 @@
 // Состав офиса, маршрутизация CEO и тексты заданий. Чистые функции без вызовов модели.
+import { echo, ECHO_LINE_SHARE } from './eval.mjs';
 
 export const AGENTS = [
   { id: 'research', name: 'Luma 2', role: 'Исследователь рынка', focus: 'Проверяй спрос, сегменты клиентов, конкурентов и источники. Отделяй факты от гипотез.' },
@@ -567,12 +568,16 @@ function clipLines(text, max) {
  * Результаты коллег для подсказки: без <think>, обрезанные, с общим лимитом.
  * outcomes — [{ agentId, result }] в порядке важности. Пустые и неудачные пропускаются.
  */
+// Пометка «допущение» отдельной строкой — оговорка автора, а не данные: маленькая модель переписывала её к себе дословно.
+const ASSUMPTION_LINE = /^\s*(?:(?:[-*•–]|\d+[.)])\s+)?[*_\s]*допущени/iu;
+
 export function compactHandoffs(outcomes, { perSource = HANDOFF_SOURCE_CHARS, total = HANDOFF_TOTAL_CHARS } = {}) {
   const handoffs = [];
   let left = total;
   for (const outcome of outcomes) {
     // Маркеры подсказки в чужом тексте не должны выглядеть как новое задание.
-    const text = stripThink(outcome?.result).replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
+    const text = stripThink(outcome?.result).split(/\r?\n/).filter(line => !ASSUMPTION_LINE.test(line)).join('\n').trim()
+      .replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
     if (!text || left < 80) continue;
     const clipped = clipLines(text, Math.min(perSource, left));
     handoffs.push({ agentId: outcome.agentId, text: clipped });
@@ -583,20 +588,40 @@ export function compactHandoffs(outcomes, { perSource = HANDOFF_SOURCE_CHARS, to
 
 // Имя источника в подсказке есть (иначе модель не поймёт, откуда данные), но с явным запретом выдавать их за свои.
 export function handoffBlock(handoffs = []) {
-  return handoffs.map(h => `ДАННЫЕ ОТ КОЛЛЕГИ (${agentLabel(h.agentId)}), используй как вход, не переписывай и не приписывай себе:\n${h.text}\n\n`).join('');
+  if (!handoffs.length) return '';
+  return handoffs.map(h => `ДАННЫЕ ОТ КОЛЛЕГИ (${agentLabel(h.agentId)}), используй как вход, не переписывай и не приписывай себе:\n${h.text}\n\n`).join('') +
+    'Сделай свою часть своими словами: строки и допущения коллег не повторяй.\n\n';
 }
 
 // --- Реплики команды (CROSS_TALK) ----------------------------------------------------------------
 export const CHAT_PEER_CHARS = 220;
 
-/** Подсказка для реплики коллеге: сжатые ответы, 1–2 предложения, обращение по имени. */
-export function chatMessages(agent, ownResult, peers) {
-  const own = clipLines(stripThink(ownResult), CHAT_PEER_CHARS);
-  const others = peers.map(p => `- ${agentLabel(p.agentId)}: ${clipLines(stripThink(p.result), CHAT_PEER_CHARS).replace(/\s*\n\s*/g, ' ')}`).join('\n');
-  const example = agentById(peers[0].agentId).name;
+/**
+ * С кем говорить в чате. Сначала — с тем, кто уже написал этому сотруднику (ответ на вопрос),
+ * затем — с тем, чьими данными он пользуется (HANDOFF_SOURCES), затем — с тем, кто строит работу на его данных,
+ * иначе — с первым другим участником. Один собеседник вместо всех: короче подсказка, реплика по делу.
+ */
+export function chatPartner(agentId, participantIds, askedBy) {
+  const others = participantIds.filter(id => id !== agentId);
+  if (others.includes(askedBy)) return askedBy;
+  return (HANDOFF_SOURCES[agentId] || []).find(id => others.includes(id))
+    ?? others.find(id => (HANDOFF_SOURCES[id] || []).includes(agentId))
+    ?? others[0];
+}
+
+/**
+ * Подсказка для реплики коллеге: свой результат и результат собеседника (сжатые), 1–2 предложения, обращение по имени.
+ * incoming — реплика, которую собеседник уже написал этому сотруднику: на неё нужно ответить.
+ */
+export function chatMessages(agent, ownResult, partner, incoming) {
+  const squeeze = text => clipLines(stripThink(text), CHAT_PEER_CHARS).replace(/\s*\n\s*/g, ' ');
+  const name = agentById(partner.agentId).name;
+  const ask = incoming
+    ? `${name} пишет тебе: «${incoming.text}»\n\nОтветь ${name} 1–2 предложениями по своему результату: конкретно, с названием или цифрой из него.`
+    : `Напиши ${name} 1–2 предложения: один конкретный вопрос или предложение, как связать его результат с твоим.`;
   return [
     { role: 'system', content: `Ты ${agent.name}, ${agent.role} в Pixel AI Office. Это короткая реплика коллеге в рабочем чате, а не отчёт. Отвечай на русском. Не выдумывай факты, клиентов и цифры.` },
-    { role: 'user', content: `ТВОЙ РЕЗУЛЬТАТ (сжато):\n${own.replace(/\s*\n\s*/g, ' ')}\n\nРЕЗУЛЬТАТЫ КОЛЛЕГ (сжато):\n${others}\n\nНапиши одному коллеге 1–2 предложения: уточнение, возражение или следующий шаг по его результату. Начни с имени коллеги («${example}, …»). Без приветствий и списков.` }
+    { role: 'user', content: `ТВОЙ РЕЗУЛЬТАТ (сжато):\n${squeeze(ownResult)}\n\nРЕЗУЛЬТАТ ${agentLabel(partner.agentId)} (сжато):\n${squeeze(partner.result)}\n\n${ask} Не пересказывай результат коллеги. Начни с имени («${name}, …»). Без приветствий и списков.` }
   ];
 }
 
@@ -615,8 +640,9 @@ const LEADING_ADDRESS = /^(?:luma|люма)\s*[1-6](?!\d)/iu;
  * Реплика коллеге из ответа модели или null. Убирает <think>, свою подпись («Luma 5:»), кавычки,
  * оставляет максимум два предложения. to — первый упомянутый участник обсуждения (кроме самого автора).
  * truncated — ответ оборван лимитом токенов: недописанное второе предложение отбрасывается.
+ * sources — результаты коллег: реплика, которая в основном их пересказывает, отбрасывается.
  */
-export function cleanChatReply(text, speakerId, participantIds = [], { truncated = false } = {}) {
+export function cleanChatReply(text, speakerId, participantIds = [], { truncated = false, sources = [] } = {}) {
   const speaker = agentById(speakerId);
   // «Luma 5:», «**Luma 5 · Менеджер продаж**:» — подпись автора, не часть реплики.
   const signature = speaker ? new RegExp(String.raw`^\s*(?:\*\*)?(?:luma|люма)\s*${speaker.name.slice(-1)}(?!\d)[^:\n]{0,40}?(?:\*\*)?\s*:\s*`, 'iu') : /$^/;
@@ -639,6 +665,8 @@ export function cleanChatReply(text, speakerId, participantIds = [], { truncated
   reply = clip(picked.join('').replaceAll(DECIMAL_DOT, '.').trim(), 280);
   const bare = reply.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim().replace(LEADING_ADDRESS, '').trim();
   if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 8) return null;
+  // Пересказ результата коллеги (sources — их результаты) — не реплика: в чате ничего нового.
+  if (sources.length && echo(reply, sources).share >= ECHO_LINE_SHARE) return null;
   let to;
   for (const match of reply.matchAll(NAME_MENTION)) {
     const agent = agentByNumber(match[1]);

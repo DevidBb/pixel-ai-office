@@ -74,12 +74,19 @@ test('compactHandoffs: без <think>, обрезка по источнику и
   assert.ok(!/ТВОЁ ЗАДАНИЕ/.test(handoffs[1].text), 'чужой текст не выглядит как новое задание');
 });
 
+test('compactHandoffs: пометки «допущение» — оговорки автора, коллеге не передаются', () => {
+  const [handoff] = compactHandoffs([{ agentId: 'research', result: '1. Студенты — утром.\n2. Преподаватели — днём.\n\nдопущение: данные основаны на общем поведении.\n- **Допущение:** 30 гостей в день.\n3. Соседи — вечером, допущение: живут рядом.' }]);
+  assert.equal(handoff.text, '1. Студенты — утром.\n2. Преподаватели — днём.\n\n3. Соседи — вечером, допущение: живут рядом.');
+  // Источник только из допущений — передавать нечего.
+  assert.deepEqual(compactHandoffs([{ agentId: 'research', result: 'Допущение: спрос есть.' }]), []);
+});
+
 test('agentMessages: данные коллеги — помеченный блок перед заданием, формат «ТВОЁ ЗАДАНИЕ» сохранён', () => {
   const plan = planFor(COFFEE_GOAL);
   const task = plan.tasks.find(t => t.agentId === 'finance');
   const handoffs = [{ agentId: 'sales', text: '1. Листовки\n2. Скидка' }];
   const [system, user] = agentMessages(agent('finance'), task, plan, handoffs);
-  assert.match(user.content, /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 5 · Менеджер продаж\), используй как вход, не переписывай и не приписывай себе:\n1\. Листовки\n2\. Скидка\n\nТВОЁ ЗАДАНИЕ:\nвыручка 30 × 3 €\n/);
+  assert.match(user.content, /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 5 · Менеджер продаж\), используй как вход, не переписывай и не приписывай себе:\n1\. Листовки\n2\. Скидка\n\nСделай свою часть своими словами: строки и допущения коллег не повторяй\.\n\nТВОЁ ЗАДАНИЕ:\nвыручка 30 × 3 €\n/);
   assert.match(user.content, /КАЛЬКУЛЯТОР ОФИСА.*30 × 3 = 90/, 'калькулятор на месте');
   assert.ok(user.content.indexOf('ДАННЫЕ ОТ КОЛЛЕГИ') < user.content.indexOf('ТВОЁ ЗАДАНИЕ'));
   assert.match(system.content, /не упоминай других сотрудников/);
@@ -87,7 +94,7 @@ test('agentMessages: данные коллеги — помеченный бло
   assert.deepEqual(agentMessages(agent('finance'), task, plan, []), agentMessages(agent('finance'), task, plan));
   const roleBased = planFor(STARTUP_GOAL);
   const [, roleUser] = agentMessages(agent('sales'), roleBased.tasks.find(t => t.agentId === 'sales'), roleBased, handoffs);
-  assert.match(roleUser.content, /ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n.*\n\nДАННЫЕ ОТ КОЛЛЕГИ \(Luma 5[^\n]*\n1\. Листовки\n2\. Скидка\n\nТВОЯ ЗАДАЧА:/);
+  assert.match(roleUser.content, /ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n.*\n\nДАННЫЕ ОТ КОЛЛЕГИ \(Luma 5[^\n]*\n1\. Листовки\n2\. Скидка\n\nСделай свою часть[^\n]*\n\nТВОЯ ЗАДАЧА:/);
   assert.equal(handoffBlock([]), '');
 });
 
@@ -169,7 +176,7 @@ test('HANDOFF=auto, ролевая задача: зависимые ждут и�
       assert.ok(model.calls.find(c => c.agentId === s).doneAt < call.calledAt, `${id} вызван до готовности ${s}`);
     }
   }
-  assert.match(userPrompt(model, 'sales'), /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 2 · Исследователь рынка\), используй как вход, не переписывай и не приписывай себе:\nСегменты: офисы IT-компаний, коворкинги\.\n\nДАННЫЕ ОТ КОЛЛЕГИ \(Luma 3 · Продуктолог\)[^\n]*\nОТВЕТ product: общая задача\n\nТВОЯ ЗАДАЧА:/);
+  assert.match(userPrompt(model, 'sales'), /ДАННЫЕ ОТ КОЛЛЕГИ \(Luma 2 · Исследователь рынка\), используй как вход, не переписывай и не приписывай себе:\nСегменты: офисы IT-компаний, коворкинги\.\n\nДАННЫЕ ОТ КОЛЛЕГИ \(Luma 3 · Продуктолог\)[^\n]*\nОТВЕТ product: общая задача\n\nСделай свою часть своими словами[^\n]*\n\nТВОЯ ЗАДАЧА:/);
   assert.ok(!userPrompt(model, 'research').includes('ДАННЫЕ ОТ КОЛЛЕГИ'), 'у исследователя источников нет');
   // Журнал: кто чьи данные получил; в результате — список источников.
   const logs = ofType(events, 'log').map(e => e.message);

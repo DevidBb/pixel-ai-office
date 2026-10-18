@@ -4,7 +4,7 @@ import { readConfig } from '../server/config.mjs';
 import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import { RunStore } from '../server/runs.mjs';
-import { AGENTS, chatMessages, cleanChatReply, CHAT_PEER_CHARS } from '../server/office.mjs';
+import { AGENTS, chatMessages, chatPartner, cleanChatReply, CHAT_PEER_CHARS } from '../server/office.mjs';
 import { reduceTask, resetTask, taskFromRun } from '../src/taskEvents.ts';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
@@ -66,19 +66,43 @@ test('cleanChatReply: подпись автора убрана, максимум
   }
 });
 
-test('chatMessages: сжатые ответы коллег, имена коллег, без формата «ТВОЁ ЗАДАНИЕ»', () => {
+test('chatMessages: свой результат и результат одного коллеги, сжатые; обращение по имени; без «ТВОЁ ЗАДАНИЕ»', () => {
   const long = 'Строка отчёта очень подробная.\n'.repeat(30);
-  const [system, user] = chatMessages(AGENTS.find(a => a.id === 'sales'), `<think>x</think>${long}`, [
-    { agentId: 'research', result: long }, { agentId: 'finance', result: 'Выручка 90 €.' }
-  ]);
+  const [system, user] = chatMessages(AGENTS.find(a => a.id === 'sales'), `<think>x</think>${long}`, { agentId: 'research', result: long });
   assert.match(system.content, /Ты Luma 5, Менеджер продаж/);
   assert.match(system.content, /не отчёт/);
-  assert.match(user.content, /- Luma 2 · Исследователь рынка: Строка/);
-  assert.match(user.content, /- Luma 6 · Финансовый аналитик: Выручка 90 €\./);
+  assert.match(user.content, /РЕЗУЛЬТАТ Luma 2 · Исследователь рынка \(сжато\):\nСтрока/);
   assert.match(user.content, /«Luma 2, …»/);
+  assert.match(user.content, /Не пересказывай/);
   assert.ok(!user.content.includes('ТВОЁ ЗАДАНИЕ') && !user.content.includes('think'));
-  const researchLine = user.content.split('\n').find(l => l.startsWith('- Luma 2'));
-  assert.ok(researchLine.length <= CHAT_PEER_CHARS + 40, 'ответ коллеги обрезан');
+  const researchLine = user.content.split('\n\n').find(block => block.startsWith('РЕЗУЛЬТАТ Luma 2')).split('\n')[1];
+  assert.ok(researchLine.length <= CHAT_PEER_CHARS, 'ответ коллеги обрезан');
+});
+
+test('chatMessages: вопрос от коллеги — ответ ему, а не новая тема', () => {
+  const [, user] = chatMessages(AGENTS.find(a => a.id === 'product'), 'Латте 180 ₽.', { agentId: 'research', result: 'Студенты.' },
+    { agentId: 'research', text: 'Luma 3, какие напитки дешевле всего для студентов?' });
+  assert.match(user.content, /Luma 2 пишет тебе: «Luma 3, какие напитки дешевле всего для студентов\?»/);
+  assert.match(user.content, /Ответь Luma 2/);
+  assert.match(user.content, /«Luma 2, …»/);
+});
+
+test('chatPartner: вопрос от коллеги, затем тот, чьими данными пользуешься, затем тот, кто пользуется твоими', () => {
+  assert.equal(chatPartner('product', ALL), 'research');
+  assert.equal(chatPartner('finance', ALL), 'product');
+  assert.equal(chatPartner('research', ALL), 'product', 'у исследователя источников нет — тот, кто строит на его данных');
+  assert.equal(chatPartner('finance', ['finance', 'sales']), 'sales');
+  assert.equal(chatPartner('creator', ['creator', 'sales']), 'sales', 'ни источников, ни зависимых — первый другой участник');
+  assert.equal(chatPartner('product', ALL, 'sales'), 'sales', 'сначала ответ на вопрос');
+  assert.equal(chatPartner('product', ALL, 'product'), 'research', 'себе не отвечает');
+  assert.equal(chatPartner('product', ['product']), undefined);
+});
+
+test('cleanChatReply: пересказ результата коллеги не показывается, вопрос по нему — показывается', () => {
+  const research = '1. Группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену.\n2. Группа взрослых — предпочитают спокойные и уютные варианты, часто приходят вечером.';
+  assert.equal(cleanChatReply('Luma 2, группа взрослых предпочитают спокойные и уютные варианты, часто приходят вечером.', 'product', ALL, { sources: [research] }), null);
+  assert.deepEqual(cleanChatReply('Luma 2, сколько взрослых приходит вечером? Под них сделаю десерты.', 'product', ALL, { sources: [research] }),
+    { text: 'Luma 2, сколько взрослых приходит вечером? Под них сделаю десерты.', to: 'research' });
 });
 
 test('reduceTask: agent-chat попадает в обсуждение, а не в результаты; resetTask очищает', () => {
@@ -198,8 +222,12 @@ test('CROSS_TALK=true: реплики — отдельные события agen
   // Результаты и проверка чужих имён не затронуты репликами.
   for (const result of ofType(events, 'agent-result')) assert.deepEqual(result.foreign, []);
   assert.ok(!ofType(events, 'log').some(e => /упомянуты другие сотрудники/.test(e.message)));
-  // Реплика коллеге видит сжатые результаты остальных.
-  assert.match(chatCalls.find(c => c.agentId === 'chat-sales').messages[1].content, /- Luma 2 · Исследователь рынка: ОТВЕТ research: 3 группы клиентов/);
+  // Реплика коллеге видит сжатый результат одного коллеги — того, на чьих данных строит работу.
+  const salesPrompt = chatCalls.find(c => c.agentId === 'chat-sales').messages[1].content;
+  assert.match(salesPrompt, /РЕЗУЛЬТАТ Luma 2 · Исследователь рынка \(сжато\):\nОТВЕТ research: 3 группы клиентов/);
+  assert.ok(!salesPrompt.includes('ОТВЕТ finance'), 'остальные коллеги в подсказку не попадают');
+  // Вопрос исследователя продуктологу — продуктолог отвечает ему.
+  assert.match(chatCalls.find(c => c.agentId === 'chat-product').messages[1].content, /Luma 2 пишет тебе: «Luma 3, какие напитки дешевле всего для студентов\?»/);
 });
 
 test('CROSS_TALK=true с одним исполнителем: обсуждать не с кем, вызовов нет', async () => {

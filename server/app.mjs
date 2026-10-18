@@ -4,7 +4,7 @@ import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs, chatMessages, cleanChatReply
+  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs, chatMessages, chatPartner, cleanChatReply
 } from './office.mjs';
 
 const DELTA_INTERVAL_MS = 300;
@@ -312,27 +312,34 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
   }
 
   /**
-   * Короткий раунд реплик (CROSS_TALK): каждый, кто сдал результат, пишет коллеге 1–2 предложения.
+   * Короткий раунд реплик (CROSS_TALK): каждый, кто сдал результат, пишет одному коллеге 1–2 предложения
+   * (chatPartner), а если коллега уже написал ему — отвечает. Пересказ чужого результата не показывается.
    * Реплики — отдельные события agent-chat: не результаты, не попадают в «Кто выполнил задачу» и в проверку чужих имён.
    * Всё состояние — в рамках одного запуска.
    */
   async function crossTalk(results, { safeEmit, signal, runId }) {
     const participants = results.map(r => r.agentId);
+    const said = [];
     safeEmit('chat-start', {});
     safeEmit('log', { agentId: 'ceo', message: 'Команда коротко обсуждает результаты (CROSS_TALK).' });
     for (const own of results) {
       if (signal.aborted) return;
       const agent = AGENTS.find(a => a.id === own.agentId);
-      const peers = results.filter(r => r.agentId !== own.agentId);
+      const incoming = said.findLast(message => message.to === own.agentId);
+      const partner = results.find(r => r.agentId === chatPartner(own.agentId, participants, incoming?.agentId));
       safeEmit('agent-status', { agentId: agent.id, status: 'thinking', task: 'Пишет коллеге' });
       let reply = null;
       try {
-        const { text, stats } = await callModel(chatMessages(agent, own.result, peers), {
+        const { text, stats } = await callModel(chatMessages(agent, own.result, partner, incoming?.agentId === partner.agentId ? incoming : undefined), {
           maxTokens: config.crossTalkMaxTokens, signal, label: `${runId}/chat-${agent.id}`
         });
         if (signal.aborted) return;
-        reply = cleanChatReply(text, agent.id, participants, { truncated: stats?.doneReason === 'length' });
-        if (!reply) diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая или заглушка`, { text: String(text || '').slice(0, 80) });
+        reply = cleanChatReply(text, agent.id, participants, {
+          truncated: stats?.doneReason === 'length',
+          sources: results.filter(r => r.agentId !== agent.id).map(r => r.result)
+        });
+        if (!reply) diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая, заглушка или пересказ`, { text: String(text || '').slice(0, 80) });
+        else said.push({ agentId: agent.id, ...reply });
       } catch (error) {
         if (signal.aborted) return;
         // Реплика — необязательная часть: сбой не портит готовый итог.
