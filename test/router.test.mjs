@@ -354,3 +354,36 @@ test('нераспознанное «не» рядом с именем: сотр
   assert.equal(uncertainNote('Не стесняйся, Luma 4 — слоган', ['creator']), '');
   assert.equal(uncertainNote(COFFEE_GOAL, Object.keys(COFFEE_ASSIGNMENTS)), '');
 });
+
+test('«всю команду», «всю пятёрку» — просьба подключить всех', () => {
+  for (const goal of [
+    'Подключи всю команду: идеи для кофейни',
+    'Задействуй всю пятёрку специалистов: идеи для кофейни',
+    'Хочу заработать 300 € за месяц на фотосъёмке. Подключи всю команду: кому продавать и по какой цене',
+    'Не забудь подключить всю команду: идеи для кофейни'
+  ]) {
+    const route = routeByRules(goal);
+    assert.deepEqual(route.agentIds, ALL, goal);
+    assert.equal(route.source, 'explicit', goal);
+  }
+});
+
+test('отказ от всей команды не подключает всех', () => {
+  for (const goal of [
+    'Не нужно звать всю команду, придумай слоган',
+    'Не подключай всех специалистов, придумай слоган',
+    'Не надо подключать к этой работе всю команду, Luma 4 — слоган',
+    'Всю команду подключать не надо, Luma 4 — слоган',
+    'Всех сотрудников не зови, придумай слоган'
+  ]) {
+    assert.deepEqual(routeByRules(goal).agentIds, ['creator'], goal);
+  }
+});
+
+test('«не» перед другой частью фразы не отменяет просьбу о всей команде', () => {
+  assert.deepEqual(routeByRules('Не используй клише и поработайте всей командой над идеями для кофейни').agentIds, ALL);
+  assert.deepEqual(routeByRules('Подключи всю команду, не нужно экономить время: идеи для кофейни').agentIds, ALL);
+  const route = routeByRules('Не подключай Luma 2 и поработайте всей командой: идеи для кофейни');
+  assert.deepEqual(route.agentIds, ['product', 'creator', 'sales', 'finance']);
+  assert.deepEqual(route.excluded, ['research']);
+});
