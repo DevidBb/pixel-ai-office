@@ -138,6 +138,11 @@ test('CROSS_TALK=true: реплики — отдельные события agen
   const final = ofType(events, 'final')[0];
   assert.ok(events.indexOf(final) < events.indexOf(chats[0]));
   assert.ok(events.indexOf(chats.at(-1)) < events.findIndex(e => e.type === 'done'));
+  // Реплика остаётся подписью сотрудника на сцене: после agent-chat его статус больше не меняется.
+  for (const chat of chats) {
+    const later = events.slice(events.indexOf(chat) + 1);
+    assert.ok(!later.some(e => e.type === 'agent-status' && e.agentId === chat.agentId), `${chat.agentId}: подпись не затирается`);
+  }
   assert.ok(!final.result.includes('какие напитки дешевле'));
   assert.ok(!/Luma 5, сколько клиентов/.test(final.result));
   // Результаты и проверка чужих имён не затронуты репликами.

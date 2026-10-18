@@ -324,20 +324,22 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
       const agent = AGENTS.find(a => a.id === own.agentId);
       const peers = results.filter(r => r.agentId !== own.agentId);
       safeEmit('agent-status', { agentId: agent.id, status: 'thinking', task: 'Пишет коллеге' });
+      let reply = null;
       try {
         const { text } = await callModel(chatMessages(agent, own.result, peers), {
           maxTokens: config.crossTalkMaxTokens, signal, label: `${runId}/chat-${agent.id}`
         });
         if (signal.aborted) return;
-        const reply = cleanChatReply(text, agent.id, participants);
-        if (reply) safeEmit('agent-chat', { agentId: agent.id, ...reply });
-        else diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая или заглушка`, { text: String(text || '').slice(0, 80) });
+        reply = cleanChatReply(text, agent.id, participants);
+        if (!reply) diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая или заглушка`, { text: String(text || '').slice(0, 80) });
       } catch (error) {
         if (signal.aborted) return;
         // Реплика — необязательная часть: сбой не портит готовый итог.
         diag(`[run ${runId}] реплика ${agent.id} не получена`, { error: error?.message });
       }
+      // Сначала статус, потом реплика: на сцене реплика становится подписью сотрудника, и статус её не затирает.
       safeEmit('agent-status', { agentId: agent.id, status: 'done', task: 'Подзадача готова' });
+      if (reply) safeEmit('agent-chat', { agentId: agent.id, ...reply });
     }
   }
 
