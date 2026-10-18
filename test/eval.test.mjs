@@ -136,3 +136,23 @@ test('countSlogans: подписанный слоган с пояснением 
   assert.equal(countSlogans('Слоганы:\n1. «Кофе между парами»\n2. «Перерыв со вкусом»\n3. «Твоя пара — кофе»'), 3);
   assert.equal(countSlogans('- **"Вдохновение в каждом бургере."**\n- **"Кофе, который делает день лучше."**'), 2);
 });
+
+// Ревью Codex (PR #9, третий круг).
+test('калькулятор: разделители тысяч склеиваются, а не режут число', () => {
+  assert.deepEqual(arithmeticHints('бюджет 1 000 + 2 000 рублей'), ['1000 + 2000 = 3000']);
+  assert.deepEqual(arithmeticHints('10 000 * 3'), ['10000 * 3 = 30000']);
+  assert.deepEqual(arithmeticHints('30 × 3 €, зал на 40 мест'), ['30 × 3 = 90']);
+});
+
+test('оценка финансиста: выдуманные цифры в строке «допущение» тоже провал', () => {
+  const report = scoreResults([{ agentId: 'finance', result: 'Выручка: 90 €. Допущение: затраты 60 € и маржа 30 €.' }]);
+  const finance = report.agents.find(a => a.agentId === 'finance');
+  assert.equal(finance.ok, false);
+  assert.match(finance.detail, /лишние числа: 60/);
+  assert.equal(scoreResults([{ agentId: 'finance', result: 'Выручка: 90 € (30 заказов × 3 €). Допущение: 30 заказов.' }]).agents.find(a => a.agentId === 'finance').ok, true);
+});
+
+test('countListItems: вложенные пояснения не считаются отдельными вариантами', () => {
+  assert.equal(countListItems('1. Студенты\n   - Нужна низкая цена\n   - Быстрое обслуживание\n2. Преподаватели\n3. Сотрудники'), 3);
+  assert.equal(countListItems('- Капучино\n\t* с корицей\n- Чай\n- Лимонад'), 3);
+});

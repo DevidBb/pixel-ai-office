@@ -380,15 +380,19 @@ function evaluateArithmetic(expression) {
  * - «/» и «-» — действие только с пробелами вокруг («120 / 4», «100 - 15»); без пробелов это
  *   период, дата, телефон, номер или диапазон («2025/2026», «2026-10-18», «8-800-555-35-35», «2-3»);
  * - выражение не может быть частью числа с точками или версии («1.2.3+4», «18.10.2026»);
- * - «-» в цепочке из одних «-» — диапазон, а не вычитание; дд/мм/гггг — дата.
+ * - «-» в цепочке из одних «-» — диапазон, а не вычитание; дд/мм/гггг — дата;
+ * - разделители тысяч («1 000») склеиваются до поиска выражений.
  */
-export function arithmeticHints(text) {
+export function arithmeticHints(input) {
+  // «1 000 + 2 000», «10 000 * 3»: склеиваем разделители тысяч (пробел, неразрывный пробел), иначе выражение
+  // начнётся внутри первого числа («000 + 2 = 2»).
+  const text = input.replace(/(\d)[ \u00a0\u202f](?=\d{3}(?!\d))/g, '$1');
   const hints = [];
   for (const match of text.matchAll(ARITHMETIC)) {
     const expression = match[0];
     const before = text[match.index - 1] || '';
     const after = text.slice(match.index + expression.length, match.index + expression.length + 2);
-    if (/[\d.,]/.test(before) || /^[.,]\d/.test(after)) continue;
+    if (/[\d.,]/.test(before) || /^[.,]?\d/.test(after)) continue;
     const trimmed = expression.trim();
     if (/\d[/\-−]|[/\-−]\d/.test(trimmed)) continue;
     if (/^\d+(?:\s*[-−]\s*\d+)+$/.test(trimmed)) continue;

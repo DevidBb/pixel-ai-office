@@ -10,9 +10,19 @@ function contentLines(text) {
   });
 }
 
-/** Пункты списка: «- …», «* …», «• …», «1. …», «1) …». Заголовки вида «**3 группы:**» не считаются. */
+const LIST_MARKER = /^(\s*)(?:[-*•–]|\d+[.)])\s+(.*)$/u;
+
+/**
+ * Пункты списка верхнего уровня: «- …», «* …», «• …», «1. …», «1) …».
+ * Вложенные пояснения (с большим отступом), заголовки вида «**3 группы:**» и пометки «допущение» не считаются.
+ */
 export function countListItems(text) {
-  return contentLines(text).filter(line => /^(?:[-*•–]\s+|\d+[.)]\s+)/u.test(line) && !/:\s*\**$/u.test(line.replace(/^(?:[-*•–]|\d+[.)])\s+/u, ''))).length;
+  const items = text.split(/\r?\n/).map(line => line.match(LIST_MARKER)).filter(Boolean)
+    .map(([, indent, body]) => ({ indent: indent.replace(/\t/g, '    ').length, body: body.trim() }))
+    .filter(({ body }) => body && !/^[*_\s]*допущени/iu.test(body) && !/:\s*\**$/u.test(body));
+  if (!items.length) return 0;
+  const top = Math.min(...items.map(item => item.indent));
+  return items.filter(item => item.indent === top).length;
 }
 
 const QUOTE = String.raw`(?:«[^»\n]{3,}»|"[^"\n]{3,}"|“[^”\n]{3,}”)`;
@@ -45,10 +55,10 @@ const CHECKS = {
   finance: {
     label: 'выручка 30 × 3 € = 90 € без выдуманных цифр',
     check: text => {
-      // 90 ищем во всём ответе (модель иногда помечает сам расчёт как «допущение»),
-      // лишние числа — только вне пометок «допущение».
+      // И 90, и лишние числа ищем во всём ответе: модель может пометить расчёт «допущением»
+      // или спрятать туда выдуманные затраты («Допущение: затраты 60 €»).
       const has90 = /(?<![\d.,])90(?![\d.,])/.test(text);
-      const extra = [...new Set(numbersIn(text).filter(n => ![30, 3, 90].includes(n)))];
+      const extra = [...new Set((text.match(/\d+(?:[.,]\d+)?/g) || []).map(n => Number(n.replace(',', '.'))).filter(n => ![30, 3, 90].includes(n)))];
       return { ok: has90 && extra.length === 0, detail: `${has90 ? '90 есть' : 'нет 90'}${extra.length ? `; лишние числа: ${extra.join(', ')}` : ''}` };
     }
   }
