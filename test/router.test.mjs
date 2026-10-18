@@ -551,3 +551,12 @@ test('финальный круг: обращение «Все специали�
     assert.equal(wantsWholeTeam(goal), true, goal);
   }
 });
+
+test('Codex, 6-й круг: метка-содержимое, обращение по роли, «не всех, а весь офис»', () => {
+  for (const goal of ['Переведи текст. Текст: позови всю команду', 'Менеджер продаж — напиши приглашение на открытие и позови всю команду']) {
+    assert.equal(wantsWholeTeam(goal), false, goal);
+  }
+  assert.deepEqual(routeByExplicit('Не всех специалистов, а вообще весь офис подключи к обсуждению идеи')?.agentIds, ALL);
+  assert.deepEqual(routeByExplicit('Не всех специалистов, пожалуйста, а весь офис подключи к обсуждению идеи')?.agentIds, ALL);
+  assert.deepEqual(routeByRules('Не всех специалистов, а только Luma 4 — слоган').agentIds, ['creator']);
+});

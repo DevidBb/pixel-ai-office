@@ -81,6 +81,10 @@ const fragmentAfter = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ')
 // - раньше в том же предложении назван Luma 2–6 («Luma 5, напиши приглашение и позови всю команду» — команда бизнеса).
 const FRAGMENT_DELIMITERS = new RegExp(FRAGMENT_SPLIT.source, 'giu');
 const LABEL = /^\s*(?:[\p{L}-]+\s*){1,2}$/u;
+// «Текст: …», «Черновик: …» — дальше материал для обработки, а не поручение.
+const CONTENT_LABEL = /(?<!\p{L})(?:текст|черновик|фраз|цитат|пример|сообщени|письм|пост|перевод|оригинал)\p{L}*/iu;
+// Задача адресована сотруднику по роли: «Менеджер продаж — напиши приглашение и позови всю команду».
+const ROLE_ADDRESS = /(?<!\p{L})(?:исследовател\p{L}*(?:\s+рынка)?|аналитик\p{L}*\s+рынка|продуктолог\p{L}*|креатор\p{L}*|менеджер\p{L}*\s+(?:по\s+)?продаж\p{L}*|продажник\p{L}*|финансов\p{L}*\s+аналитик\p{L}*|финансист\p{L}*)\s*[:—–-]/iu;
 const VERB_LIKE = /(?:и|й|ь|ти)(?:те)?(?!\p{L})/iu;
 const SENTENCE_START = /[.!?\n](?=[^.!?\n]*$)/u;
 const ADDRESSED_AGENT = /(?<![\p{L}\d])(?:luma|люма)\s*[-#№]?\s*[2-6](?!\d)/iu;
@@ -89,13 +93,13 @@ function notForOffice(goal, start) {
   const count = pattern => (head.match(pattern) || []).length;
   if (count(/«/g) > count(/»/g) || count(/["“”]/g) % 2 === 1) return true;
   const sentence = head.slice(head.search(SENTENCE_START) + 1);
-  if (ADDRESSED_AGENT.test(sentence)) return true;
+  if (ADDRESSED_AGENT.test(sentence) || ROLE_ADDRESS.test(sentence)) return true;
   const pieces = sentence.split(FRAGMENT_SPLIT);
   const delimiters = sentence.match(FRAGMENT_DELIMITERS) || [];
   const quoteMark = delimiters.at(-1);
   if (quoteMark !== ':' && quoteMark !== '—' && quoteMark !== '–') return false;
   const label = pieces.at(-2) || '';
-  return !(LABEL.test(label) && !VERB_LIKE.test(label));
+  return !(LABEL.test(label) && !VERB_LIKE.test(label) && !CONTENT_LABEL.test(label));
 }
 // Фрагмент — вопрос («Разве всех подключать не нужно?»): риторика, а не отказ.
 const fragmentIsQuestion = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ').match(FRAGMENT_SPLIT)?.[0] === '?';
@@ -127,6 +131,8 @@ const REFUSAL_BEFORE = new RegExp(String.raw`^\s*(?:(?:мне|нам)\s+нужн
   String.raw`|не(?:\s+${REFUSE_VERB}|\s+(?:надо|нужн\p{L}*|стоит|хочу|будем)(?:\s+${CALL_INFINITIVE})?)?` +
   String.raw`|(?:можно|можешь|можете|можем|давай|давайте|чтобы|лучше(?:\s+бы)?|хорошо\s+бы)\s+не(?:\s+будем)?\s+${CALL_INFINITIVE})\s+$`, 'iu');
 const NOTHING_AFTER_REFUSAL = /^\s*(?:нуж\p{L}*|требуются)?\s*$/iu;
+// «Не всех специалистов, а вообще весь офис подключи» — противопоставление снова про всех: не отказ.
+const CONTRAST_TO_ALL = /^\s*,?\s*а\s+(?:вообще\s+|лучше\s+|просто\s+)?(?:весь|всю|всех|все|вся|всем)(?!\p{L})/iu;
 // «Всех специалистов подключать не надо», «Все специалисты не нужны», «Всех лучше не звать». «Исключать не нужно» — не отказ.
 const REFUSAL_AFTER = new RegExp(String.raw`^(?:\s+лучше)?(?:\s+${CALL_INFINITIVE})?\s+не\s+(?:${REFUSE_VERB}|${CALL_INFINITIVE}|надо|нужно|стоит|требуется|нуж(?:ен|на|ны))\s*$`, 'iu');
 const ADDRESS_TO_ALL = new RegExp(String.raw`^\s+не\s+${REFUSE_VERB}\s*$`, 'iu');
@@ -290,7 +296,9 @@ export function wantsWholeTeam(goal) {
     // Отказ после слова — только когда «все/всех» начинает фрагмент: «Исключать всех специалистов не стоит» — просьба.
     // «Все специалисты, не используйте …» — обращение к агентам (именительный и приказ), а не отказ от них.
     const addressed = form === 'все' && ADDRESS_TO_ALL.test(after);
-    return !(REFUSAL_BEFORE.test(before) && NOTHING_AFTER_REFUSAL.test(after)) && !(!before.trim() && !addressed && REFUSAL_AFTER.test(after));
+    const refusedBefore = REFUSAL_BEFORE.test(before) && NOTHING_AFTER_REFUSAL.test(after) &&
+      !CONTRAST_TO_ALL.test(goal.slice(match.index + match[0].length).replace(POLITE_INSERT, ' ').slice(after.length));
+    return !refusedBefore && !(!before.trim() && !addressed && REFUSAL_AFTER.test(after));
   }));
 }
 
