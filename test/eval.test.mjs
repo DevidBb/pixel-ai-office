@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { countListItems, countSlogans, scoreResults } from '../server/eval.mjs';
-import { arithmeticHints, requestedCount, agentMessages, buildPlan, routeByRules, AGENTS } from '../server/office.mjs';
+import { arithmeticHints, requestedCount, requestedItems, agentMessages, buildPlan, routeByRules, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
 // Настоящие ответы qwen3:1.7b из базового замера (data/evals) — до исправления подсказок.
@@ -87,4 +87,35 @@ test('ролевое задание (без адресации) по-прежн�
   const finance = plan.tasks.find(t => t.agentId === 'finance');
   const [system] = agentMessages(AGENTS.find(a => a.id === 'finance'), finance, plan);
   assert.match(system.content, /Рассчитывай выручку, затраты, маржу/);
+});
+
+// Ревью Codex (PR #9, P1): даты, телефоны, периоды и версии не должны превращаться в «точные» подсказки.
+test('калькулятор не считает даты, телефоны, периоды и версии', () => {
+  for (const text of ['дата 2026-10-18', 'телефон 8-800-555-35-35', 'сезон 2025/2026', 'версия 1.2.3+4', 'релиз v2.0.1-3', '18/10/2026', 'ставка 12.5+3.2.1']) {
+    assert.deepEqual(arithmeticHints(text), [], text);
+  }
+  // «/» и «-» с пробелами — действия; × и * — в любом написании.
+  assert.deepEqual(arithmeticHints('120 / 4 + 10; 100 - 15 + 5; 30×3; 2,5 * 4'), ['120 / 4 + 10 = 40', '100 - 15 + 5 = 90', '30×3 = 90', '2,5 * 4 = 10']);
+});
+
+// Ревью Codex (PR #9, P2): число-дата не количество; количество после глагола находится.
+test('requestedItems: «3 сентября», «2 квартал» — не количество; «предложи 3 напитка» — количество', () => {
+  for (const text of ['3 сентября подготовь анонс', '2 квартал — прогноз продаж', 'к 5 часам отчёт', 'посчитай 30 заказов', '2 раза в неделю пост']) {
+    assert.equal(requestedItems(text), null, text);
+  }
+  assert.deepEqual(requestedItems('предложи 3 напитка'), { count: 3, what: 'напитка' });
+  assert.deepEqual(requestedItems('придумай три идеи для акции'), { count: 3, what: 'идеи для акции' });
+  assert.deepEqual(requestedItems('2 способа привлечения'), { count: 2, what: 'способа привлечения' });
+});
+
+test('подсказка: «Luma 3 — предложи 3 напитка» получает форму списка, «3 сентября подготовь анонс» — нет', () => {
+  for (const [goal, id, expected] of [
+    ['Luma 3 — предложи 3 напитка для кофейни', 'product', /ровно из 3 пунктов.*«напитка для кофейни»/],
+    ['Luma 4 — 3 сентября подготовь анонс открытия', 'creator', null]
+  ]) {
+    const plan = buildPlan(goal, routeByRules(goal));
+    const [, user] = agentMessages(AGENTS.find(a => a.id === id), plan.tasks[0], plan);
+    if (expected) assert.match(user.content, expected, goal);
+    else assert.ok(!user.content.includes('нумерованный список'), goal);
+  }
 });

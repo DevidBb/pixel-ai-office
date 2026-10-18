@@ -375,14 +375,23 @@ function evaluateArithmetic(expression) {
   return Number.isFinite(result) ? Math.round(result * 100) / 100 : null;
 }
 
-/** «выручка 30 × 3 €» → ['30 × 3 = 90']. Одиночные числа и даты не трогает. */
+/**
+ * «выручка 30 × 3 €» → ['30 × 3 = 90']. Осторожно: лучше не подсказать, чем подсказать неверно.
+ * - «/» и «-» — действие только с пробелами вокруг («120 / 4», «100 - 15»); без пробелов это
+ *   период, дата, телефон, номер или диапазон («2025/2026», «2026-10-18», «8-800-555-35-35», «2-3»);
+ * - выражение не может быть частью числа с точками или версии («1.2.3+4», «18.10.2026»);
+ * - «-» в цепочке из одних «-» — диапазон, а не вычитание; дд/мм/гггг — дата.
+ */
 export function arithmeticHints(text) {
   const hints = [];
-  for (const [expression] of text.matchAll(ARITHMETIC)) {
+  for (const match of text.matchAll(ARITHMETIC)) {
+    const expression = match[0];
+    const before = text[match.index - 1] || '';
+    const after = text.slice(match.index + expression.length, match.index + expression.length + 2);
+    if (/[\d.,]/.test(before) || /^[.,]\d/.test(after)) continue;
     const trimmed = expression.trim();
-    // Только «-» между числами — диапазон («2-3 варианта»), телефон («123-45-67») или номер, а не вычитание.
-    if (/^\d+(?:\s*-\s*\d+)+$/.test(trimmed)) continue;
-    // дд/мм/гггг — дата, а не деление.
+    if (/\d[/\-−]|[/\-−]\d/.test(trimmed)) continue;
+    if (/^\d+(?:\s*[-−]\s*\d+)+$/.test(trimmed)) continue;
     if (/^\d{1,2}\s*\/\s*\d{1,2}\s*\/\s*\d{2,4}$/.test(trimmed)) continue;
     const value = evaluateArithmetic(expression);
     if (value !== null) hints.push(`${trimmed} = ${String(value).replace('.', ',')}`);
@@ -392,12 +401,24 @@ export function arithmeticHints(text) {
 
 const NUMBER_WORDS = { два: 2, две: 2, три: 3, четыре: 4, пять: 5, шесть: 6, семь: 7, восемь: 8, девять: 9, десять: 10 };
 
-/** «3 напитка», «2 способа привлечения», «три идеи» → 3 / 2 / 3; иначе null. */
-export function requestedCount(objective) {
-  const match = objective.trim().match(/^(\d+|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+(?!(?:[×x*]|€|\$|руб|р\.|%|раз))\p{L}/iu);
+// После числа — не количество результатов: даты, периоды, единицы времени и порядковые слова.
+const NOT_A_COUNT = String.raw`(?:январ|феврал|март|апрел|ма[яй]|июн|июл|август|сентябр|октябр|ноябр|декабр|квартал|полугоди|недел|месяц|год|лет|дн[яеи]|день|сут|час|минут|секунд|числ|класс|курс|этаж|раз|процент|%|€|\$|руб|р\.|[×x*]|человек|гост|клиент|заказ|чашк|шт)`;
+// Количество в начале поручения или после 1–2 слов-глаголов: «3 напитка», «предложи 3 напитка», «придумай три идеи».
+const COUNT_PATTERN = new RegExp(
+  String.raw`^(?:\p{L}+\s+){0,2}?(\d+|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s+(?!${NOT_A_COUNT})(\p{L}[\s\S]*)$`,
+  'iu'
+);
+
+/** «3 напитка», «предложи 2 способа», «три идеи» → { count, what }; иначе null. «3 сентября», «2 квартал», «30 × 3 €» — не количество. */
+export function requestedItems(objective) {
+  const match = objective.trim().match(COUNT_PATTERN);
   if (!match) return null;
-  const n = /^\d+$/.test(match[1]) ? Number(match[1]) : NUMBER_WORDS[match[1].toLowerCase()];
-  return n >= 2 && n <= 10 ? n : null;
+  const count = /^\d+$/.test(match[1]) ? Number(match[1]) : NUMBER_WORDS[match[1].toLowerCase()];
+  return count >= 2 && count <= 10 ? { count, what: match[2].trim() } : null;
+}
+
+export function requestedCount(objective) {
+  return requestedItems(objective)?.count ?? null;
 }
 
 // Подсказка намеренно короткая и без имён коллег: на CPU каждый токен подсказки стоит ~45 мс,
@@ -412,9 +433,8 @@ export function agentMessages(agent, task, plan) {
   const shared = plan.tasks.length > 1 ? ' Другие части цели делают коллеги — пиши только по своей роли.' : '';
   const context = task.assigned ? contextForAgent(task.context) : '';
   const one = task.exactlyOne ? ' Нужен ровно один вариант — дай один, без списка альтернатив.' : '';
-  const count = task.assigned ? requestedCount(task.objective) : null;
   // «3 напитка» → что именно перечислять: «напитка»; пункт — само название, а не совет и не пометка.
-  const what = count ? task.objective.trim().replace(/^\S+\s+/u, '') : '';
+  const { count, what } = (task.assigned && requestedItems(task.objective)) || {};
   const shape = count
     ? ` Ответ — нумерованный список ровно из ${count} пунктов (1. … ${count}. …). Каждый пункт начинается с конкретного названия (что перечислить: «${what}»), затем короткое пояснение. Не пиши советов вместо вариантов. Допущения — одной строкой после списка, не пунктом списка.`
     : '';
