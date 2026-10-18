@@ -44,6 +44,16 @@ test('cleanChatReply: подпись автора убрана, максимум
   assert.equal(cleanChatReply('Luma 3, всё проверили. Второе предложение...третье тоже. Лишнее.', 'finance', ALL).text, 'Luma 3, всё проверили. Второе предложение...третье тоже.');
   assert.equal(cleanChatReply('Luma 3, правда?!это важно. Лишнее. Ещё.', 'finance', ALL).text, 'Luma 3, правда?!это важно. Лишнее.');
   assert.equal(cleanChatReply('Luma 3, всё проверили\u2024 Предлагаю снизить.', 'finance', ALL).text, 'Luma 3, всё проверили\u2024 Предлагаю снизить.');
+  // Ответ оборван лимитом токенов: незаконченное второе предложение не показываем, первое — показываем.
+  const cut = { truncated: true };
+  assert.equal(cleanChatReply('Luma 3, капучино подтверждено. Luma 4, Креатор: Слоган "Качество, вкус', 'finance', ALL, cut).text, 'Luma 3, капучино подтверждено.');
+  assert.equal(cleanChatReply('Luma 3, нужна цена стакана для расчёта выручки', 'finance', ALL, cut).text, 'Luma 3, нужна цена стакана для расчёта выручки');
+  // Сокращение перед строчной буквой — не конец предложения: при обрыве оно не теряет продолжение.
+  assert.equal(cleanChatReply('Luma 3, ожидаем выручку 20 тыс. рублей при продаже', 'finance', ALL, cut).text, 'Luma 3, ожидаем выручку 20 тыс. рублей при продаже');
+  assert.equal(cleanChatReply('Luma 3, нужна смета, т.е. расчёт. Второе. Третье.', 'finance', ALL).text, 'Luma 3, нужна смета, т.е. расчёт. Второе.');
+  // Модель закончила сама, просто без точки: оба предложения остаются.
+  assert.equal(cleanChatReply('Luma 3, расчёты проверены. Предлагаю снизить цену до 250 рублей', 'finance', ALL).text, 'Luma 3, расчёты проверены. Предлагаю снизить цену до 250 рублей');
+  assert.equal(cleanChatReply('Luma 3, да. Уточни себестоимость стакана', 'finance', ALL).text, 'Luma 3, да. Уточни себестоимость стакана');
   for (const [open, close] of [['„', '“'], ['‘', '’'], ['"', '"'], ['(', ')']]) {
     assert.equal(cleanChatReply(`Luma 3, клиент спросил: ${open}Какая цена?${close} Предлагаю поднять. Третье.`, 'finance', ALL).text,
       `Luma 3, клиент спросил: ${open}Какая цена?${close} Предлагаю поднять.`, `${open}…${close}`);
@@ -81,7 +91,8 @@ test('reduceTask: agent-chat попадает в обсуждение, а не �
 // --- HTTP с мок-моделью ---
 
 const CHAT_ANSWERS = {
-  research: '<think>что спросить</think>Luma 3, какие напитки дешевле всего для студентов?',
+  // Оборван лимитом токенов (doneReason: length): недописанный хвост не показывается.
+  research: '<think>что спросить</think>Luma 3, какие напитки дешевле всего для студентов? Luma 4, слоган «Кофе',
   product: 'OK',
   creator: '',
   sales: '<think>бесконечные размышления',
@@ -104,7 +115,7 @@ function mockModel({ hangChat = false } = {}) {
             opts.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('aborted')); }, { once: true });
           });
         }
-        return { text: CHAT_ANSWERS[agentId.slice(5)], stats: {} };
+        return { text: CHAT_ANSWERS[agentId.slice(5)], stats: agentId === 'chat-research' ? { doneReason: 'length' } : {} };
       }
       await new Promise(resolve => setTimeout(resolve, 2));
       const task = messages[1].content.match(/ТВОЁ ЗАДАНИЕ:\n(.*)/);

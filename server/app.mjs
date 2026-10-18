@@ -326,11 +326,11 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
       safeEmit('agent-status', { agentId: agent.id, status: 'thinking', task: 'Пишет коллеге' });
       let reply = null;
       try {
-        const { text } = await callModel(chatMessages(agent, own.result, peers), {
+        const { text, stats } = await callModel(chatMessages(agent, own.result, peers), {
           maxTokens: config.crossTalkMaxTokens, signal, label: `${runId}/chat-${agent.id}`
         });
         if (signal.aborted) return;
-        reply = cleanChatReply(text, agent.id, participants);
+        reply = cleanChatReply(text, agent.id, participants, { truncated: stats?.doneReason === 'length' });
         if (!reply) diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая или заглушка`, { text: String(text || '').slice(0, 80) });
       } catch (error) {
         if (signal.aborted) return;

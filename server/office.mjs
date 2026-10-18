@@ -609,8 +609,9 @@ const STUB_REPLY = /^(?:ok(?:ay)?|ок(?:ей)?|хорошо|ладно|поня
 /**
  * Реплика коллеге из ответа модели или null. Убирает <think>, свою подпись («Luma 5:»), кавычки,
  * оставляет максимум два предложения. to — первый упомянутый участник обсуждения (кроме самого автора).
+ * truncated — ответ оборван лимитом токенов: недописанное второе предложение отбрасывается.
  */
-export function cleanChatReply(text, speakerId, participantIds = []) {
+export function cleanChatReply(text, speakerId, participantIds = [], { truncated = false } = {}) {
   const speaker = agentById(speakerId);
   // «Luma 5:», «**Luma 5 · Менеджер продаж**:» — подпись автора, не часть реплики.
   const signature = speaker ? new RegExp(String.raw`^\s*(?:\*\*)?(?:luma|люма)\s*${speaker.name.slice(-1)}(?!\d)[^:\n]{0,40}?(?:\*\*)?\s*:\s*`, 'iu') : /$^/;
@@ -619,12 +620,18 @@ export function cleanChatReply(text, speakerId, participantIds = []) {
     .replace(/\s+/g, ' ')
     .replace(/^["«“'\s]+|["»”'\s]+$/gu, '')
     .trim();
-  // Конец предложения — знак и закрывающие кавычки/скобки, за которыми не строчная буква: «…цена?» Предлагаю»
-  // режется после кавычки, «расчёты.«Цена…» и «!2 клиента» — тоже. Точка между цифрами («3.50 €») — не конец:
-  // на время разбора она заменена похожим знаком.
+  // Конец предложения — знак и закрывающие кавычки/скобки, за которыми (через пробелы или сразу) идёт не строчная
+  // буква: «…цена?» Предлагаю» режется после кавычки, «расчёты.«Цена…» и «!2 клиента» — тоже, а сокращения
+  // перед строчной («20 тыс. рублей», «т.е. смета») — нет. Точка между цифрами («3.50 €») — не конец:
+  // на время разбора она заменена служебным знаком.
   const sentences = reply.replace(/(\d)\.(?=\d)/g, `$1${DECIMAL_DOT}`)
-    .match(/.+?(?:[.!?…]+["'»”“’)\]]*(?=[^\p{Ll}.!?…"'»”“’)\]]|$)|$)/gu) || [];
-  reply = clip(sentences.slice(0, 2).join('').replaceAll(DECIMAL_DOT, '.').trim(), 280);
+    .match(/.+?(?:[.!?…]+["'»”“’)\]]*(?=\s*[^\p{Ll}\s.!?…"'»”“’)\]]|\s*$)|$)/gu) || [];
+  // Ответ, оборванный лимитом токенов (truncated: doneReason = length), кончается недописанным предложением:
+  // второе такое не показываем («…Слоган "Качество, вкус»), единственное — показываем как есть.
+  // Без обрыва предложение без точки в конце — законченное.
+  const picked = sentences.slice(0, 2);
+  if (truncated && picked.length === 2 && !/[.!?…]["'»”“’)\]]*$/u.test(picked[1].trim())) picked.pop();
+  reply = clip(picked.join('').replaceAll(DECIMAL_DOT, '.').trim(), 280);
   const bare = reply.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim();
   if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 12) return null;
   let to;
