@@ -4,7 +4,7 @@ import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed, uncertainNote
+  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs
 } from './office.mjs';
 
 const DELTA_INTERVAL_MS = 300;
@@ -166,16 +166,43 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         : '';
       safeEmit('log', { agentId: 'ceo', message: `CEO назначил ${plan.tasks.length === 1 ? 'одного специалиста' : `${plan.tasks.length} специалистов`} (${how}): ${plan.tasks.map(t => agentLabel(t.agentId)).join(', ')}.${queueNote}` });
       safeEmit('agent-status', { agentId: 'ceo', status: 'working', task: 'Координирует команду' });
+      // Передача результата: зависимый сотрудник ждёт результатов тех, на чьих данных строит работу.
+      const handoff = handoffEnabled(plan, config.handoff, config.concurrency);
+      const graph = handoff ? handoffGraph(plan) : {};
+      const names = ids => ids.map(id => AGENTS.find(a => a.id === id).name).join(', ');
       for (const task of plan.tasks) {
-        safeEmit('agent-status', { agentId: task.agentId, status: 'idle', task: 'Задание получено, ждёт очереди к модели' });
+        const sources = graph[task.agentId] || [];
+        safeEmit('agent-status', { agentId: task.agentId, status: 'idle', task: sources.length ? `Задание получено, ждёт данные от ${names(sources)}` : 'Задание получено, ждёт очереди к модели' });
+      }
+      if (handoff && plan.tasks.some(t => graph[t.agentId].length)) {
+        const chains = plan.tasks.filter(t => graph[t.agentId].length).map(t => `${names(graph[t.agentId])} → ${names([t.agentId])}`);
+        safeEmit('log', { agentId: 'ceo', message: `CEO связал работу команды: ${chains.join('; ')}. Остальные начинают сразу.` });
       }
 
-      // Все задания выдаются сразу; результат каждого отправляется по готовности.
-      // Фактическую параллельность генерации ограничивает LLM_CONCURRENCY.
+      // Независимые задания выдаются сразу; зависимые — как только готовы их источники.
+      // Результат каждого отправляется по готовности. Фактическую параллельность генерации ограничивает LLM_CONCURRENCY.
       let startedCount = 0;
-      const outcomes = await Promise.all(plan.tasks.map(async task => {
+      const running = new Map();
+      const runTask = task => {
+        if (!running.has(task.agentId)) running.set(task.agentId, performTask(task));
+        return running.get(task.agentId);
+      };
+      const performTask = async task => {
         const agent = AGENTS.find(a => a.id === task.agentId);
         const agentStarted = { at: 0 };
+        const sources = graph[task.agentId] || [];
+        // Граф без циклов (источник всегда выше по списку AGENTS), поэтому ожидание не зацикливается.
+        const inputs = await Promise.all(sources.map(id => runTask(plan.tasks.find(t => t.agentId === id))));
+        if (cancelled()) return null;
+        const handoffs = compactHandoffs(inputs.filter(o => o?.result));
+        const received = handoffs.map(h => h.agentId);
+        const missing = sources.filter(id => !received.includes(id));
+        if (received.length) {
+          safeEmit('log', { agentId: agent.id, message: `${agent.name} получил данные от ${names(received)}.` });
+        }
+        if (missing.length) {
+          safeEmit('log', { agentId: agent.id, message: `Данных от ${names(missing)} нет — ${agent.name} работает без них.`, kind: 'warning' });
+        }
         // Текст по мере написания: копим кусочки и отправляем не чаще раза в DELTA_INTERVAL_MS.
         let pending = '';
         let lastDeltaAt = 0;
@@ -186,7 +213,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
           lastDeltaAt = Date.now();
         };
         try {
-          const { text: result, stats } = await callModel(agentMessages(agent, task, plan), {
+          const { text: result, stats } = await callModel(agentMessages(agent, task, plan, handoffs), {
             maxTokens: task.maxTokens,
             signal,
             label: `${runId}/${agent.id}`,
@@ -205,8 +232,9 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
           if (cancelled()) return null;
           flushDelta();
           const seconds = Math.round((Date.now() - agentStarted.at) / 1000);
-          const foreign = foreignAttributions(agent.id, result);
-          safeEmit('agent-result', { agentId: agent.id, subtaskId: task.id, result, stats, foreign });
+          // Имена тех, чьи данные переданы явно, — ссылка на источник, а не «пишет за команду».
+          const foreign = foreignAttributions(agent.id, result, received);
+          safeEmit('agent-result', { agentId: agent.id, subtaskId: task.id, result, stats, foreign, ...(received.length ? { handoffFrom: received } : {}) });
           safeEmit('agent-status', { agentId: agent.id, status: 'done', task: 'Подзадача готова' });
           safeEmit('log', { agentId: agent.id, message: `Результат готов за ${seconds} с${formatStats(stats)}.`, kind: 'success' });
           if (stats?.doneReason === 'length') {
@@ -215,7 +243,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
           if (foreign.length) {
             safeEmit('log', { agentId: agent.id, message: `В ответе упомянуты другие сотрудники (${foreign.join(', ')}). Это текст ${agent.name}, а не их результаты.`, kind: 'warning' });
           }
-          return { agentId: agent.id, result };
+          return { agentId: agent.id, result, ...(received.length ? { handoffFrom: received } : {}) };
         } catch (error) {
           if (cancelled()) return null;
           const message = error?.message || 'Неизвестная ошибка.';
@@ -224,7 +252,8 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
           safeEmit('log', { agentId: agent.id, message: `Не справился: ${message}`, kind: 'warning' });
           return { agentId: agent.id, error: message };
         }
-      }));
+      };
+      const outcomes = await Promise.all(plan.tasks.map(runTask));
       if (cancelled()) return;
 
       const results = outcomes.filter(o => o?.result);
@@ -357,7 +386,8 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         ok: true, configured: Boolean(config.apiKey) || config.isLocalUrl, model: config.model, provider: config.provider,
         concurrency: config.concurrency, activeCalls: limiter.active, queuedCalls: limiter.waiting,
         timeoutMs: config.timeoutMs, router: config.routerMode, ceoSummary: config.ceoSummary,
-        agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens
+        agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens,
+        handoff: config.handoff
       });
     }
     // Проверка модели вызывает модель (занимает очередь, у платного API стоит денег), поэтому только POST:

@@ -437,7 +437,7 @@ export function requestedCount(objective) {
 // а перечисленные имена модель повторяет в ответе.
 // Для адресного задания описание роли не передаётся: маленькая модель заполняет его как шаблон
 // («Предложение / Цена-гипотеза / Критерии» вместо трёх напитков, «затраты и маржа», когда просили выручку).
-export function agentMessages(agent, task, plan) {
+export function agentMessages(agent, task, plan, handoffs = []) {
   const base = `Ты ${agent.name}, ${agent.role} в Pixel AI Office. Отвечай на русском, конкретно и честно. Не выдумывай ссылки, клиентов, контакты и продажи. Пиши только свой результат: не упоминай других сотрудников и не пиши за них.`;
   const system = task.assigned
     ? `${base} Выполняй ровно то, что сказано в задании: не добавляй разделы, цифры и расчёты, о которых не просили.`
@@ -452,9 +452,10 @@ export function agentMessages(agent, task, plan) {
     : '';
   const math = arithmeticHints(task.objective);
   const calc = math.length ? `\nКАЛЬКУЛЯТОР ОФИСА (посчитано точно, используй эти значения и покажи расчёт): ${math.join('; ')}\n` : '';
+  const received = handoffBlock(handoffs);
   const user = task.assigned
-    ? `${context ? `КОНТЕКСТ:\n${context}\n\n` : ''}ТВОЁ ЗАДАНИЕ:\n${task.objective}\n${calc}\nДай только готовый результат по этому заданию, коротко.${shape}${one} Допущения помечай словом «допущение».`
-    : `ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n${task.context}\n\nТВОЯ ЗАДАЧА:\n${task.objective}${shared}\n\nДай готовый практический результат (не план намерений). Будь кратким: заголовки и короткие списки.${one} Допущения помечай словом «допущение».`;
+    ? `${context ? `КОНТЕКСТ:\n${context}\n\n` : ''}${received}ТВОЁ ЗАДАНИЕ:\n${task.objective}\n${calc}\nДай только готовый результат по этому заданию, коротко.${shape}${one} Допущения помечай словом «допущение».`
+    : `ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\n${task.context}\n\n${received}ТВОЯ ЗАДАЧА:\n${task.objective}${shared}\n\nДай готовый практический результат (не план намерений). Будь кратким: заголовки и короткие списки.${one} Допущения помечай словом «допущение».`;
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
@@ -464,12 +465,15 @@ export function needsModelSummary(plan, mode) {
   return Boolean(mode);
 }
 
-/** Имена других сотрудников, которые встречаются в ответе агента (признак того, что он пишет «за команду»). */
-export function foreignAttributions(agentId, text) {
+/**
+ * Имена других сотрудников, которые встречаются в ответе агента (признак того, что он пишет «за команду»).
+ * received — сотрудники, чьи данные агенту передали явно (handoff): ссылка на источник — не подмена, их имена не считаются.
+ */
+export function foreignAttributions(agentId, text, received = []) {
   const found = new Set();
   for (const match of text.matchAll(NAME_MENTION)) {
     const agent = agentByNumber(match[1]);
-    if (agent.id !== agentId) found.add(agent.name);
+    if (agent.id !== agentId && !received.includes(agent.id)) found.add(agent.name);
   }
   return [...found];
 }
@@ -484,7 +488,8 @@ export function attributionBlock(plan, outcomes) {
   const lines = plan.tasks.map(task => {
     const outcome = outcomes.find(o => o.agentId === task.agentId);
     const what = task.assigned ? ` — «${clip(task.objective, 80)}»` : '';
-    if (outcome?.result) return `- ✅ ${agentLabel(task.agentId)}${what}: результат получен`;
+    const used = outcome?.handoffFrom?.length ? ` (с данными от ${names(outcome.handoffFrom)})` : '';
+    if (outcome?.result) return `- ✅ ${agentLabel(task.agentId)}${what}: результат получен${used}`;
     return `- ❌ ${agentLabel(task.agentId)}${what}: не выполнено${outcome?.error ? ` (${outcome.error})` : ''}`;
   });
   return `## Кто выполнил задачу\n${lines.join('\n')}`;
@@ -501,3 +506,83 @@ export function summaryMessages(goal, results, failed) {
     { role: 'user', content: `ЦЕЛЬ:\n${goal}\n\nРЕЗУЛЬТАТЫ СПЕЦИАЛИСТОВ:\n${combinedResults(results)}${missing}\n\nСоставь краткий итог на русском: (1) вывод, (2) что готово и кем, (3) гипотезы и пробелы, (4) три следующих действия.` }
   ];
 }
+
+// --- Передача результата (handoff) ---------------------------------------------------------------
+// Кто на чьих данных строит работу. Порядок источников — по важности: при обрезке первыми остаются они.
+// Зависеть можно только от сотрудника выше по списку AGENTS — так циклов не бывает по построению.
+const HANDOFF_SOURCES = {
+  research: [],
+  product: ['research'],
+  creator: ['product', 'research'],
+  sales: ['research', 'product'],
+  finance: ['product', 'sales', 'research']
+};
+// На CPU каждый токен подсказки стоит ~45 мс: 450 символов источника ≈ 150 токенов ≈ 7 с.
+export const HANDOFF_SOURCE_CHARS = 450;
+export const HANDOFF_TOTAL_CHARS = 900;
+
+/**
+ * Нужна ли передача результата.
+ * auto — только для ролевых заданий (каждый делает «свою часть» общей цели) и при LLM_CONCURRENCY=1:
+ * - адресные задания пользователь разделил сам («Luma 2 — …; Luma 6 — …», «все получают сразу») — они независимы,
+ *   а чужие данные в подсказке маленькой модели провоцируют лишние разделы и цифры;
+ * - при одном запросе к модели за раз очередь и так идёт по порядку AGENTS, ожидание не стоит времени —
+ *   платим только токенами подсказки. При параллельности ≥2 цепочка зависимостей съела бы выигрыш.
+ */
+export function handoffEnabled(plan, mode, concurrency = 1) {
+  if (plan.tasks.length < 2) return false;
+  if (mode === 'auto') return concurrency === 1 && plan.tasks.every(t => !t.assigned);
+  return Boolean(mode);
+}
+
+/** Граф зависимостей плана: agentId → от кого ждать данных. Только сотрудники из плана, без циклов. */
+export function handoffGraph(plan) {
+  const inPlan = new Set(plan.tasks.map(t => t.agentId));
+  const order = id => AGENTS.findIndex(a => a.id === id);
+  return Object.fromEntries(plan.tasks.map(task => [
+    task.agentId,
+    (HANDOFF_SOURCES[task.agentId] || []).filter(id => inPlan.has(id) && order(id) < order(task.agentId))
+  ]));
+}
+
+// Размышления модели (<think>…</think>, в том числе незакрытые) — не данные и не реплика.
+const THINK = /<think>[\s\S]*?(?:<\/think>|$)/giu;
+
+function stripThink(text) {
+  return String(text || '').replace(THINK, '').trim();
+}
+
+/** Обрезка по строкам: целые строки, пока влезают; длинная первая строка — с многоточием. */
+function clipLines(text, max) {
+  if (text.length <= max) return text;
+  let out = '';
+  for (const line of text.split(/\r?\n/)) {
+    if (`${out}\n${line}`.length > max - 1) break;
+    out = out ? `${out}\n${line}` : line;
+  }
+  return `${(out || clip(text, max - 1)).trimEnd()}…`;
+}
+
+/**
+ * Результаты коллег для подсказки: без <think>, обрезанные, с общим лимитом.
+ * outcomes — [{ agentId, result }] в порядке важности. Пустые и неудачные пропускаются.
+ */
+export function compactHandoffs(outcomes, { perSource = HANDOFF_SOURCE_CHARS, total = HANDOFF_TOTAL_CHARS } = {}) {
+  const handoffs = [];
+  let left = total;
+  for (const outcome of outcomes) {
+    // Маркеры подсказки в чужом тексте не должны выглядеть как новое задание.
+    const text = stripThink(outcome?.result).replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
+    if (!text || left < 80) continue;
+    const clipped = clipLines(text, Math.min(perSource, left));
+    handoffs.push({ agentId: outcome.agentId, text: clipped });
+    left -= clipped.length;
+  }
+  return handoffs;
+}
+
+// Имя источника в подсказке есть (иначе модель не поймёт, откуда данные), но с явным запретом выдавать их за свои.
+export function handoffBlock(handoffs = []) {
+  return handoffs.map(h => `ДАННЫЕ ОТ КОЛЛЕГИ (${agentLabel(h.agentId)}), используй как вход, не переписывай и не приписывай себе:\n${h.text}\n\n`).join('');
+}
+

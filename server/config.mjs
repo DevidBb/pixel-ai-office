@@ -59,6 +59,9 @@ export function readConfig(env = process.env) {
     summaryMaxTokens: envInt(env, 'CEO_SUMMARY_MAX_TOKENS', 600, 50),
     // auto: сводка моделью только для ролевых заданий; при адресных заданиях итог собирается из ответов без пересказа.
     ceoSummary: ['', 'auto'].includes((env.CEO_SUMMARY ?? '').trim().toLowerCase()) ? 'auto' : envBool(env, 'CEO_SUMMARY', true),
+    // Передача результата между зависимыми сотрудниками (research → product → creator/sales → finance).
+    // auto: только для ролевых заданий и при LLM_CONCURRENCY=1 (см. handoffEnabled в office.mjs); true — всегда; false — никогда.
+    handoff: ['', 'auto'].includes((env.HANDOFF ?? '').trim().toLowerCase()) ? 'auto' : envBool(env, 'HANDOFF', false),
     maxAgents: Math.min(envInt(env, 'MAX_AGENTS', 5, 1), 5),
     ollamaThink: envBool(env, 'OLLAMA_THINK', false),
     ollamaNumCtx: envInt(env, 'OLLAMA_NUM_CTX', 4096, 512),
