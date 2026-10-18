@@ -5,7 +5,7 @@ import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import { RunStore } from '../server/runs.mjs';
 import { AGENTS, chatMessages, cleanChatReply, CHAT_PEER_CHARS } from '../server/office.mjs';
-import { reduceTask, resetTask } from '../src/taskEvents.ts';
+import { reduceTask, resetTask, taskFromRun } from '../src/taskEvents.ts';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
 const baseEnv = { OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1', OPENAI_MODEL: 'mock' };
@@ -29,6 +29,25 @@ test('cleanChatReply: подпись автора убрана, максимум
   // Чужая подпись не срезается: это обращение.
   assert.equal(cleanChatReply('Luma 6: проверь, пожалуйста, цену стакана.', 'sales', ALL).to, 'finance');
   assert.ok(cleanChatReply('а'.repeat(500), 'sales', ALL).text.length <= 280);
+  // Точка внутри числа — не конец предложения.
+  assert.equal(cleanChatReply('Luma 3, при цене 3.50 € и себестоимости 1.20 € маржа мала. Предлагаю поднять цену. Третье.', 'finance', ALL).text,
+    'Luma 3, при цене 3.50 € и себестоимости 1.20 € маржа мала. Предлагаю поднять цену.');
+  // Закрывающая кавычка после знака и пропущенный пробел перед заглавной — тоже граница предложения.
+  assert.equal(cleanChatReply('Luma 3, клиент спросил: «Какая цена?» Предлагаю поднять цену. Третье лишнее.', 'finance', ALL).text,
+    'Luma 3, клиент спросил: «Какая цена?» Предлагаю поднять цену.');
+  assert.equal(cleanChatReply('Luma 3, цена 3.50 € высокая.Давай снизим. Третье.', 'finance', ALL).text, 'Luma 3, цена 3.50 € высокая.Давай снизим.');
+  // Пропущенный пробел перед открывающей кавычкой или цифрой — тоже граница.
+  assert.equal(cleanChatReply('Luma 3, проверим расчёты.«Цена высокая». Предлагаю снизить.', 'finance', ALL).text, 'Luma 3, проверим расчёты.«Цена высокая».');
+  assert.equal(cleanChatReply('Luma 3, проверим расчёты!2 клиента уже есть. Третье.', 'finance', ALL).text, 'Luma 3, проверим расчёты!2 клиента уже есть.');
+  assert.equal(cleanChatReply('Luma 3, смета 1.5 млн мала. Предлагаю 2.5 млн. Третье.', 'finance', ALL).text, 'Luma 3, смета 1.5 млн мала. Предлагаю 2.5 млн.');
+  // Многоточие и «?!» перед строчной буквой не режутся посередине; похожий на точку знак (U+2024) остаётся как был.
+  assert.equal(cleanChatReply('Luma 3, всё проверили. Второе предложение...третье тоже. Лишнее.', 'finance', ALL).text, 'Luma 3, всё проверили. Второе предложение...третье тоже.');
+  assert.equal(cleanChatReply('Luma 3, правда?!это важно. Лишнее. Ещё.', 'finance', ALL).text, 'Luma 3, правда?!это важно. Лишнее.');
+  assert.equal(cleanChatReply('Luma 3, всё проверили\u2024 Предлагаю снизить.', 'finance', ALL).text, 'Luma 3, всё проверили\u2024 Предлагаю снизить.');
+  for (const [open, close] of [['„', '“'], ['‘', '’'], ['"', '"'], ['(', ')']]) {
+    assert.equal(cleanChatReply(`Luma 3, клиент спросил: ${open}Какая цена?${close} Предлагаю поднять. Третье.`, 'finance', ALL).text,
+      `Luma 3, клиент спросил: ${open}Какая цена?${close} Предлагаю поднять.`, `${open}…${close}`);
+  }
 });
 
 test('chatMessages: сжатые ответы коллег, имена коллег, без формата «ТВОЁ ЗАДАНИЕ»', () => {
@@ -159,7 +178,7 @@ test('CROSS_TALK=true с одним исполнителем: обсуждать
   assert.equal(ofType(events, 'agent-chat').length, 0);
 });
 
-test('CROSS_TALK=true: отмена задачи прерывает раунд реплик', async () => {
+test('CROSS_TALK=true: остановка во время обсуждения прерывает реплики, но готовый отчёт остаётся', async () => {
   const runs = new RunStore();
   const model = mockModel({ hangChat: true });
   const server = createApp({ config: readConfig({ ...baseEnv, CROSS_TALK: 'true' }), callModel: model.callModel, limiter: model.limiter, runs });
@@ -173,11 +192,19 @@ test('CROSS_TALK=true: отмена задачи прерывает раунд �
     await fetch(`${base}/api/runs/${runId}/cancel`, { method: 'POST' });
     while (run.status === 'running' && Date.now() - started < 3_000) await new Promise(r => setTimeout(r, 5));
     await new Promise(r => setTimeout(r, 30));
-    assert.equal(run.status, 'cancelled');
+    // Итог уже отправлен: остановка обрывает только необязательное обсуждение, задача завершена.
+    assert.equal(run.status, 'done');
     const chatCalls = model.calls.filter(c => c.agentId.startsWith('chat-'));
     assert.equal(chatCalls.length, 1, 'после отмены следующие реплики не запрашиваются');
     assert.ok(chatCalls[0].signal.aborted, 'идущий вызов получил отмену');
-    assert.ok(!run.events.some(e => e.type === 'agent-chat' || e.type === 'done'));
+    assert.ok(!run.events.some(e => e.type === 'agent-chat' || e.type === 'error'));
     assert.equal(model.limiter.active, 0);
+    const task = taskFromRun(await (await fetch(`${base}/api/runs/${runId}`)).json());
+    assert.equal(task.status, 'done');
+    assert.match(task.result, /^## Кто выполнил задачу/, 'отчёт не заменён текстом об остановке');
+    assert.ok(task.logs.some(l => /Обсуждение команды остановлено/.test(l.message)));
+    // Тот, кто писал реплику, не остаётся «думающим» на сцене.
+    const lastStatus = new Map(ofType(run.events, 'agent-status').map(e => [e.agentId, e.status]));
+    assert.ok(![...lastStatus.values()].includes('thinking'));
   } finally { server.closeAllConnections(); server.close(); }
 });

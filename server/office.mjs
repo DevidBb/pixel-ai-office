@@ -600,6 +600,9 @@ export function chatMessages(agent, ownResult, peers) {
   ];
 }
 
+// Временная замена точки в числе: символ из области для частного использования, в ответах модели его нет.
+const DECIMAL_DOT = '\uE000';
+
 // Ответ-заглушка: «OK», «Хорошо.», «Понял», «—». Такую реплику не показываем.
 const STUB_REPLY = /^(?:ok(?:ay)?|ок(?:ей)?|хорошо|ладно|понял[аи]?|принято|да|нет|готово|согласен|согласна|спасибо|ясно|n\/?a|нет\s+замечаний|без\s+замечаний)$/iu;
 
@@ -616,8 +619,12 @@ export function cleanChatReply(text, speakerId, participantIds = []) {
     .replace(/\s+/g, ' ')
     .replace(/^["«“'\s]+|["»”'\s]+$/gu, '')
     .trim();
-  const sentences = reply.match(/[^.!?…]+[.!?…]*/gu) || [];
-  reply = clip(sentences.slice(0, 2).join('').trim(), 280);
+  // Конец предложения — знак и закрывающие кавычки/скобки, за которыми не строчная буква: «…цена?» Предлагаю»
+  // режется после кавычки, «расчёты.«Цена…» и «!2 клиента» — тоже. Точка между цифрами («3.50 €») — не конец:
+  // на время разбора она заменена похожим знаком.
+  const sentences = reply.replace(/(\d)\.(?=\d)/g, `$1${DECIMAL_DOT}`)
+    .match(/.+?(?:[.!?…]+["'»”“’)\]]*(?=[^\p{Ll}.!?…"'»”“’)\]]|$)|$)/gu) || [];
+  reply = clip(sentences.slice(0, 2).join('').replaceAll(DECIMAL_DOT, '.').trim(), 280);
   const bare = reply.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim();
   if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 12) return null;
   let to;

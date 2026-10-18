@@ -90,6 +90,18 @@ export class RunStore {
   cancel(run) {
     if (FINISHED.has(run.status)) return false;
     run.controller?.abort(new Error('cancelled by user'));
+    // Итог уже отправлен (final) — остановка обрывает только необязательное обсуждение команды (CROSS_TALK):
+    // отчёт остаётся, задача завершена; кто писал реплику, больше не «думает».
+    if (run.events.some(event => event.type === 'final')) {
+      const lastStatus = new Map(run.events.filter(event => event.type === 'agent-status').map(event => [event.agentId, event.status]));
+      for (const [agentId, status] of lastStatus) {
+        if (status === 'thinking' || status === 'working') this.push(run, 'agent-status', { agentId, status: 'done', task: 'Подзадача готова' });
+      }
+      this.push(run, 'log', { agentId: 'ceo', message: 'Обсуждение команды остановлено пользователем. Итоговый отчёт сохранён.', kind: 'warning' });
+      this.push(run, 'done', {});
+      this.finish(run, 'done');
+      return true;
+    }
     this.push(run, 'error', { message: 'Выполнение остановлено пользователем.', cancelled: true });
     this.push(run, 'agent-status', { agentId: 'ceo', status: 'idle', task: 'Остановлено пользователем' });
     this.finish(run, 'cancelled');
