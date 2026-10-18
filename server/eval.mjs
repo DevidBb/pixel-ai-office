@@ -15,9 +15,19 @@ export function countListItems(text) {
   return contentLines(text).filter(line => /^(?:[-*•–]\s+|\d+[.)]\s+)/u.test(line) && !/:\s*\**$/u.test(line.replace(/^(?:[-*•–]|\d+[.)])\s+/u, ''))).length;
 }
 
-/** Варианты слогана: строки в кавычках «…», "…", “…”. Без кавычек — непустые строки ответа. */
+const QUOTE = String.raw`(?:«[^»\n]{3,}»|"[^"\n]{3,}"|“[^”\n]{3,}”)`;
+
+/**
+ * Сколько вариантов слогана в ответе.
+ * - слоганы списком («- "A"», «1. «B»») → число таких пунктов;
+ * - подпись «Слоган: «…»» → 1, даже если дальше в пояснении есть другие цитаты (аудитория, название);
+ * - иначе — разные цитаты, а без кавычек — непустые строки ответа.
+ */
 export function countSlogans(text) {
-  const quoted = text.match(/«[^»\n]{3,}»|"[^"\n]{3,}"|“[^”\n]{3,}”/gu) || [];
+  const listed = contentLines(text).filter(line => /^(?:[-*•–]|\d+[.)])\s+/u.test(line) && new RegExp(QUOTE, 'u').test(line));
+  if (listed.length >= 2) return listed.length;
+  if (new RegExp(String.raw`слоган\p{L}*[^\n:«"“]*:\s*(?:\*\*)?\s*${QUOTE}`, 'iu').test(text)) return 1;
+  const quoted = text.match(new RegExp(QUOTE, 'gu')) || [];
   if (quoted.length) return new Set(quoted.map(q => q.slice(1, -1).trim().toLowerCase())).size;
   return contentLines(text).length;
 }
