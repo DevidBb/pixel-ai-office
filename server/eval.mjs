@@ -96,3 +96,75 @@ export function scoreCoffeeRun(events) {
   const last = events.at(-1)?.at;
   return { agents, passed, total: agents.length, seconds: first && last ? Math.round((last - first) / 100) / 10 : null };
 }
+
+// --- Повторы за коллегами (HANDOFF, CROSS_TALK) --------------------------------------------------
+// Маленькая модель, получив чужой результат, переписывает его строки (и чужие «допущения») вместо своей работы.
+// Мера — общие тройки слов: слова сравниваются по первым пяти буквам, чтобы «группа/группы», «ценящие/ценящих»
+// совпадали, а порядок слов и смысл фразы — нет.
+const ECHO_LINE_SHARE = 0.6;
+const STEM = 5;
+
+function stems(line) {
+  return (line.toLowerCase().replaceAll('ё', 'е').match(/[\p{L}\d]+/gu) || []).map(word => word.slice(0, STEM));
+}
+
+function trigrams(words) {
+  return words.slice(2).map((_, i) => `${words[i]} ${words[i + 1]} ${words[i + 2]}`);
+}
+
+function echoLines(text) {
+  return String(text || '').replace(/<think>[\s\S]*?(?:<\/think>|$)/giu, '').split(/\r?\n/)
+    .map(line => line.trim().replace(/^(?:[-*•–]|\d+[.)])\s+/u, ''))
+    .map(line => ({ line, grams: trigrams(stems(line)) }))
+    .filter(({ grams }) => grams.length);
+}
+
+/**
+ * Сколько в тексте списано из источников: строка (от трёх слов) списана, если ≥ 60 % её троек слов есть в источниках.
+ * copiedAssumption — среди списанных есть чужая пометка «допущение». share — доля всех троек текста, найденных в источниках.
+ */
+export function echo(text, sources = []) {
+  const known = new Set(sources.flatMap(source => echoLines(source).flatMap(({ grams }) => grams)));
+  let total = 0;
+  let found = 0;
+  let copiedLines = 0;
+  let copiedAssumption = false;
+  const lines = echoLines(text);
+  for (const { line, grams } of lines) {
+    const hits = grams.filter(gram => known.has(gram)).length;
+    total += grams.length;
+    found += hits;
+    if (hits / grams.length >= ECHO_LINE_SHARE) {
+      copiedLines++;
+      if (/^[*_\s]*допущени/iu.test(line)) copiedAssumption = true;
+    }
+  }
+  return { lines: lines.length, copiedLines, copiedAssumption, share: total ? Math.round((found / total) * 100) / 100 : 0 };
+}
+
+/**
+ * Оценка ролевой задачи с HANDOFF и CROSS_TALK: что сотрудники списали из полученных данных
+ * и сколько реплик чата лишь пересказывают результаты коллег.
+ */
+export function scoreTeamRun(events) {
+  const results = events.filter(e => e.type === 'agent-result');
+  const resultOf = id => results.find(e => e.agentId === id)?.result || '';
+  const agents = results.map(e => {
+    const handoffFrom = e.handoffFrom || [];
+    return { agentId: e.agentId, handoffFrom, ...echo(e.result, handoffFrom.map(resultOf)) };
+  });
+  const chat = events.filter(e => e.type === 'agent-chat').map(e => {
+    const { share } = echo(e.text, results.filter(r => r.agentId !== e.agentId).map(r => r.result));
+    return { agentId: e.agentId, to: e.to, text: e.text, share, echo: share >= ECHO_LINE_SHARE };
+  });
+  const first = events[0]?.at;
+  const last = events.at(-1)?.at;
+  return {
+    agents, chat,
+    copiedLines: agents.reduce((sum, a) => sum + a.copiedLines, 0),
+    copiedAssumptions: agents.filter(a => a.copiedAssumption).length,
+    chatReplies: chat.length,
+    chatEchoes: chat.filter(c => c.echo).length,
+    seconds: first && last ? Math.round((last - first) / 100) / 10 : null
+  };
+}

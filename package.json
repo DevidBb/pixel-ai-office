@@ -15,7 +15,8 @@
     "test": "node --test \"test/*.test.mjs\"",
     "bench:model": "node scripts/bench-model.mjs",
     "dev:lan": "concurrently -k -n api,web \"OFFICE_ALLOW_LAN=true node server.mjs\" \"OFFICE_HOST=0.0.0.0 vite\"",
-    "eval:coffee": "node scripts/eval-coffee.mjs"
+    "eval:coffee": "node scripts/eval-coffee.mjs",
+    "eval:team": "node scripts/eval-team.mjs"
   },
   "dependencies": {
     "phaser": "^3.90.0",

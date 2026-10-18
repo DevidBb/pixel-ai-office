@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { countListItems, countSlogans, scoreResults } from '../server/eval.mjs';
+import { countListItems, countSlogans, echo, scoreResults, scoreTeamRun } from '../server/eval.mjs';
 import { arithmeticHints, requestedCount, requestedItems, agentMessages, buildPlan, routeByRules, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
@@ -180,4 +180,49 @@ test('оценка финансиста: 30 и 3 вне расчёта — вы�
 
 test('countListItems: пункт с двоеточием и вложенными пояснениями считается', () => {
   assert.equal(countListItems('1. Студенты:\n   - ценят цену\n2. Преподаватели:\n   - ценят тишину\n3. Сотрудники:\n   - заходят утром'), 3);
+});
+
+// Настоящий прогон qwen3:1.7b с HANDOFF=true (data/evals, 2026-10-18): продуктолог пересказывает исследование
+// и копирует его строку «допущение».
+const RESEARCH = '1. Группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену.\n2. Группа взрослых — предпочитают более спокойные и уютные варианты, часто приходят в вечернее время.\n\nдопущение: данные основаны на общем поведению клиентов и не исключают индивидуальных особенностей.';
+const PRODUCT = '1. Для группы студентов — регулярные посетители, ценящие качественный вкус и доступную цену: капучино.\n2. Латте на овсяном молоке за 180 ₽ — тёплый и недорогой.\nДопущение: данные основаны на общем поведению клиентов и не исключают индивидуальных особенностей.';
+
+test('echo: списанные строки — по совпадению словесных троек; регистр, «ё», знаки и маркеры списка не мешают', () => {
+  const report = echo(PRODUCT, [RESEARCH]);
+  assert.equal(report.lines, 3);
+  assert.equal(report.copiedLines, 2, 'пересказ исследования и чужое «допущение»');
+  assert.equal(report.copiedAssumption, true);
+  assert.ok(report.share > 0.4 && report.share < 0.9, String(report.share));
+  // Своё содержание — ничего не списано.
+  assert.deepEqual(echo('Латте на овсяном молоке за 180 ₽ — тёплый и недорогой.', [RESEARCH]), { lines: 1, copiedLines: 0, copiedAssumption: false, share: 0 });
+  // Общие слова без общих троек — не копия.
+  assert.equal(echo('Студенты ценят цену и вкус кофе утром.', [RESEARCH]).copiedLines, 0);
+  assert.equal(echo('* ГРУППА СТУДЕНТОВ: регулярные посетители, ценящие качественный вкус!', [RESEARCH]).copiedLines, 1);
+  assert.equal(echo('Пусть всё будет тёплым и уютным вечером.', ['пусть все будет теплым и уютным вечером']).copiedLines, 1);
+});
+
+test('echo: короткие строки, <think>, пустой ответ и пустые источники', () => {
+  assert.deepEqual(echo('', [RESEARCH]), { lines: 0, copiedLines: 0, copiedAssumption: false, share: 0 });
+  assert.deepEqual(echo('Группа студентов', [RESEARCH]), { lines: 0, copiedLines: 0, copiedAssumption: false, share: 0 }, 'меньше трёх слов не сравниваем');
+  assert.equal(echo('<think>группа студентов — регулярные посетители, ценящие качественный вкус</think>Своё мнение о кофейне рядом.', [RESEARCH]).copiedLines, 0);
+  assert.equal(echo(PRODUCT, []).copiedLines, 0);
+});
+
+test('scoreTeamRun: повторы в результатах считаются только против полученных данных, реплики — против результатов коллег', () => {
+  const events = [
+    { type: 'agent-result', agentId: 'research', result: RESEARCH, at: 1000 },
+    { type: 'agent-result', agentId: 'product', result: PRODUCT, handoffFrom: ['research'], at: 2000 },
+    { type: 'agent-result', agentId: 'creator', result: 'Слоган: «Тёплый кофе у пары». Группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену.', at: 3000 },
+    { type: 'final', at: 4000 },
+    { type: 'agent-chat', agentId: 'product', text: 'Luma 2, группа взрослых — предпочитают более спокойные и уютные варианты?', to: 'research', at: 5000 },
+    { type: 'agent-chat', agentId: 'research', text: 'Luma 3, сколько стоит латте на овсяном и берут ли его вечером?', to: 'product', at: 6000 }
+  ];
+  const report = scoreTeamRun(events);
+  assert.equal(report.seconds, 5);
+  const product = report.agents.find(a => a.agentId === 'product');
+  assert.deepEqual([product.handoffFrom, product.copiedLines, product.copiedAssumption], [['research'], 2, true]);
+  // Креатор данных не получал: совпадение с исследованием — не handoff-повтор.
+  assert.equal(report.agents.find(a => a.agentId === 'creator').copiedLines, 0);
+  assert.deepEqual(report.chat.map(c => [c.agentId, c.echo]), [['product', true], ['research', false]]);
+  assert.deepEqual([report.copiedLines, report.copiedAssumptions, report.chatEchoes, report.chatReplies], [2, 1, 1, 2]);
 });
