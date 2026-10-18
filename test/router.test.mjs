@@ -374,7 +374,11 @@ test('отказ от всей команды не подключает всех
     'Не подключай всех специалистов, придумай слоган',
     'Не надо подключать к этой работе всю команду, Luma 4 — слоган',
     'Всю команду подключать не надо, Luma 4 — слоган',
-    'Всех сотрудников не зови, придумай слоган'
+    'Всех сотрудников не зови, придумай слоган',
+    'Не надо всю команду, придумай слоган',
+    'Не нужно, пожалуйста, всех сотрудников, придумай слоган',
+    'Всю команду не подключайте, придумай слоган',
+    'Всех специалистов не зовите, придумай слоган'
   ]) {
     assert.deepEqual(routeByRules(goal).agentIds, ['creator'], goal);
   }
@@ -386,4 +390,13 @@ test('«не» перед другой частью фразы не отменя
   const route = routeByRules('Не подключай Luma 2 и поработайте всей командой: идеи для кофейни');
   assert.deepEqual(route.agentIds, ['product', 'creator', 'sales', 'finance']);
   assert.deepEqual(route.excluded, ['research']);
+});
+
+test('запрет после «всей команды» про другого сотрудника или двойное отрицание — команда остаётся', () => {
+  const route = routeByRules('Подключи всех сотрудников и не зови Luma 2: придумай слоган');
+  assert.deepEqual(route.agentIds, ['product', 'creator', 'sales', 'finance']);
+  assert.deepEqual(route.excluded, ['research']);
+  assert.deepEqual(routeByRules('Всех сотрудников не нужно исключать, придумай слоган').agentIds, ALL);
+  assert.deepEqual(routeByRules('Всю команду не надо ограничивать, придумай слоган').agentIds, ALL);
+  assert.deepEqual(routeByRules('Не надо торопиться и подключи всю команду: придумай слоган').agentIds, ALL);
 });
