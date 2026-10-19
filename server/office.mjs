@@ -1,5 +1,5 @@
 // Состав офиса, маршрутизация CEO и тексты заданий. Чистые функции без вызовов модели.
-import { echo, novelWords, ECHO_LINE_SHARE } from './eval.mjs';
+import { echo, ownPart, ECHO_LINE_SHARE } from './eval.mjs';
 
 export const AGENTS = [
   { id: 'research', name: 'Luma 2', role: 'Исследователь рынка', focus: 'Проверяй спрос, сегменты клиентов, конкурентов и источники. Отделяй факты от гипотез.' },
@@ -569,19 +569,22 @@ function clipLines(text, max) {
  * outcomes — [{ agentId, result }] в порядке важности. Пустые и неудачные пропускаются.
  */
 // Статус данных так, как его назвал автор. Порядок — от осторожного к уверенному: при нескольких признаках
-// побеждает более осторожный («Факт: примерно 30 гостей» — оценка). Факт — только по явной пометке («Факт:», «Проверено:»).
+// побеждает более осторожный («Факт: примерно 30 гостей» — оценка). Факт — только по явной пометке («Факт:», «Факты:»).
+// «Оценка конкурентов», «Возможности» — не статус данных.
 const STATUSES = [
-  { tag: 'гипотеза', word: /допущ|допуска|допустим|предпол|гипотез|не\s+провер|непровер|не\s+подтвержд|неподтвержд|вероятно|возможно/iu },
-  { tag: 'оценка', word: /оценк|оценочн|примерн|приблизит|ориентировоч|прогноз|(?:около|порядка)\s+\d|[~≈]\s*\d/iu },
-  { tag: 'факт', word: /факт|проверен|подтвержд/iu, labelOnly: true }
+  { tag: 'гипотеза', word: /допущ|допуска|допустим|предпол|гипотез|не\s+провер|непровер|не\s+подтвержд|неподтвержд|(?<!\p{L})(?:вероятно|возможно)(?!\p{L})/iu },
+  { tag: 'оценка', word: /оценочн|примерн|приблизит|ориентировоч|прогноз|(?:около|порядка)\s+\d|[~≈]\s*\d|(?<!\p{L})оценк\p{L}*(?!\p{L})(?!\s+(?:конкурент|рынк|риск|качеств|клиент|отзыв))/iu },
+  { tag: 'факт', word: /(?<!\p{L})факт(?:ы|ически)?(?!\p{L})|проверен|подтвержд/iu, labelOnly: true }
 ];
-// Пометка статуса в начале строки: «Допущение: …», «Факт — …», «Гипотезы и риски:».
-const STATUS_LABEL = /^(допущени\p{L}*|предположени\p{L}*|гипотез\p{L}*|оценк\p{L}*|прогноз\p{L}*|факт\p{L}*|проверено|не\s+проверено)(?:\s+и\s+\p{L}+)?\s*(?:[:—–-]\s*|$)/iu;
+// Пометка статуса в начале строки: «Допущение: …», «Факт — …», «Факты и допущения:».
+const STATUS_LABEL = /^(?:допущени\p{L}*|предположени\p{L}*|гипотез\p{L}*|оценк[аи](?!\p{L})|прогноз\p{L}*|факты?(?!\p{L})|проверено|не\s+проверено)(?:\s+и\s+\p{L}+)?\s*(?:[:—–-]\s*|$)/iu;
+// «Примечание: все данные — предположения» — оговорка, если в ней есть слово статуса.
+const NOTE_LABEL = /^(?:примечани\p{L}*|важно|оговорк\p{L}*)\s*[:—–-]\s*/iu;
 // Оговорка о других строках: «цены ниже — гипотезы» — о следующих, «данные основаны на общем поведении» — о предыдущих.
-// «ниже рынка», «выше, чем у конкурентов», «ниже на 20 %» — сравнение, а не ссылка на строки.
+// «ниже рынка», «выше, чем у конкурентов», «ниже на 20 %» — сравнение, а не ссылка на строки; «спрос основан на …» — сама гипотеза.
 const NOT_COMPARISON = String.raw`(?!\s*,?\s*(?:чем|на\s+\d|\d|рынк|конкур|средн|обычн))`;
 const ABOUT_NEXT = new RegExp(String.raw`(?<!\p{L})(?:ниже|далее)${NOT_COMPARISON}|(?<!\p{L})следующ`, 'iu');
-const ABOUT_PREVIOUS = new RegExp(String.raw`(?<!\p{L})выше${NOT_COMPARISON}|вс[её],?\s+что|основан|приведен|приведён|(?:эт[иоа]|вс[её])\s+(?:данн|цифр|цен|расч|результ|вариант)`, 'iu');
+const ABOUT_PREVIOUS = new RegExp(String.raw`(?<!\p{L})выше${NOT_COMPARISON}|вс[её],?\s+что|приведен|приведён|(?:эт[иоа]|вс[её])\s+(?:данн|цифр|цен|расч|результ|вариант)|(?:данн|цифр|расч|оценк|вс[её]|эт[оиа])\p{L}*[^.]{0,40}?основан`, 'iu');
 
 function statusOf(text, { label = false } = {}) {
   return STATUSES.find(s => (label || !s.labelOnly) && s.word.test(text))?.tag;
@@ -594,64 +597,50 @@ function cautious(...statuses) {
 const DIGEST_LINE_CHARS = 60;
 const DIGEST_EXPLAIN_CHARS = 50;
 const DIGEST_SENTENCE_CHARS = 100;
-// Что при сокращении строки нельзя терять: числа (с единицами — они в той же части), условия и ограничения, время.
-const DIGEST_KEEP = /\d|(?<!\p{L})(?:если|при|в\s+случае|когда|только|лишь|кроме|без|не\s+(?:более|менее|больше|меньше|дороже|дешевле|позднее)|максимум|минимум|в\s+зависимости|зависит|огранич\p{L}*|утр\p{L}*|дн[её]м|вечер\p{L}*|будн\p{L}*|выходн\p{L}*)(?!\p{L})/iu;
-// Ограничение отрицанием («не суммируется с другими акциями») и продолжение условия («при условии, что …»).
-const DIGEST_LIMIT = /^(?:но\s+|и\s+|а\s+)?не\s/iu;
-const DIGEST_CONTINUE = /^(?:что|чтобы|пока|поскольку|так\s+как|иначе)(?!\p{L})/iu;
-const DIGEST_CLAUSE = /[,;]\s+|\.\s+(?=\p{Lu})/u;
+// Данные в строке: числа, условия и ограничения, сроки и время, валюта словами. Такая строка передаётся целиком:
+// список слов условий всегда неполон, а резать по частям — терять «с мая по сентябрь» или «до конца месяца».
+const DIGEST_DATA = /\d|(?<!\p{L})(?:если|при|в\s+случае|когда|только|лишь|кроме|без|до\s+конца|в\s+течение|максимум|минимум|в\s+зависимости|зависит|огранич\p{L}*|бесплатн\p{L}*|утр\p{L}*|дн[её]м|вечер\p{L}*|будн\p{L}*|выходн\p{L}*|январ\p{L}*|феврал\p{L}*|март\p{L}*|апрел\p{L}*|ма[йя]|июн\p{L}*|июл\p{L}*|август\p{L}*|сентябр\p{L}*|октябр\p{L}*|ноябр\p{L}*|декабр\p{L}*|евро|рубл\p{L}*|доллар\p{L}*|процент\p{L}*)(?!\p{L})/iu;
+// Ограничение отрицанием («кто не пьёт коровье молоко», «не суммируется с акциями»).
+const DIGEST_LIMIT = /(?<!\p{L})не\s+\p{L}/iu;
 const DIGEST_DASH = /\s[—–-]\s/u;
-// Цитата (слоган, название) не режется: на время сокращения она — один заместитель без пробелов.
-const DIGEST_QUOTE = /«[^»\n]*»|"[^"\n]*"|“[^”\n]*”/gu;
-const QUOTE_MARK = '\uE001';
+// Цитата (слоган, название) и скобки не режутся и не делятся по запятым: на время разбора — один заместитель.
+const DIGEST_QUOTE = /«[^»\n]*»|"[^"\n]*"|“[^”\n]*”|\([^()\n]*\)/gu;
+const QUOTE_MARK = '';
 
 function cutWords(text, max) {
   return text.length <= max ? text : `${text.slice(0, max).replace(/\s+\S*$/u, '')}…`;
 }
 
-// Текст до max знаков — целиком; длиннее — первая часть (до запятой) и части с числами, условиями и ограничениями,
-// вместе с продолжением такой части. Слишком короткая первая часть («напиток, который подходит для студентов…»)
-// продолжается следующей. Части с числами и условиями не обрезаются.
-function squeeze(text, max) {
-  if (text.length <= max) return text;
-  const [first, ...parts] = text.split(DIGEST_CLAUSE).map(part => part.trim()).filter(Boolean);
-  const lead = first.length < 20 && parts.length && !DIGEST_KEEP.test(parts[0]) ? `${first}, ${parts.shift()}` : first;
-  let previous = DIGEST_KEEP.test(lead);
-  const kept = [previous ? lead : cutWords(lead, max)];
-  for (const part of parts) {
-    previous = DIGEST_KEEP.test(part) || DIGEST_LIMIT.test(part) || (previous && DIGEST_CONTINUE.test(part));
-    if (previous) kept.push(part);
-  }
-  return kept.join(', ');
-}
-
 /**
- * Длинная строка коротко. «Название — пояснение»: название, из пояснения — начало и части с числами, условиями
- * и ограничениями («Преподаватели — приходят днём, 2–3 раза в неделю, средний чек 4 €»), описание отбрасывается.
- * Строка без тире — предложение: до 100 знаков целиком (запятые там чаще перечисляют), длиннее — так же по частям.
+ * Длинная строка коротко. Строка с данными (числа, условия, ограничения) — целиком. «Название — пояснение»:
+ * перечисление после тире («студенты, преподаватели, аспиранты») — целиком, описание — первые 50 знаков по словам.
+ * Предложение без тире — до 100 знаков.
  */
 function shortenLine(text) {
+  const line = text.replace(/[.;,]+$/u, '');
+  if (line.length <= DIGEST_LINE_CHARS || DIGEST_DATA.test(line) || DIGEST_LIMIT.test(line)) return line;
   const quotes = [];
-  const line = text.replace(DIGEST_QUOTE, quote => `${QUOTE_MARK}${quotes.push(quote) - 1}${QUOTE_MARK}`).replace(/[.;,]+$/u, '');
+  const masked = line.replace(DIGEST_QUOTE, quote => `${QUOTE_MARK}${quotes.push(quote) - 1}${QUOTE_MARK}`);
   const restore = short => short.replace(new RegExp(`${QUOTE_MARK}(\\d+)${QUOTE_MARK}`, 'gu'), (_, i) => quotes[i]);
-  if (line.length <= DIGEST_LINE_CHARS) return restore(line);
-  const label = line.match(/^[^:]{1,30}:\s+(?=\S)/u)?.[0] || '';
-  const body = line.slice(label.length);
-  const dash = body.search(DIGEST_DASH);
-  const short = dash > 0
-    ? `${squeeze(body.slice(0, dash), DIGEST_LINE_CHARS)} — ${squeeze(body.slice(dash).replace(DIGEST_DASH, ''), DIGEST_EXPLAIN_CHARS)}`
-    : squeeze(body, DIGEST_SENTENCE_CHARS);
-  return restore(`${label}${short}`.replace(/[.;,]+$/u, ''));
+  if (masked.length <= DIGEST_LINE_CHARS) return line;
+  const dash = masked.search(DIGEST_DASH);
+  if (dash < 0) return restore(cutWords(masked, DIGEST_SENTENCE_CHARS));
+  const head = cutWords(masked.slice(0, dash), DIGEST_LINE_CHARS);
+  const explain = masked.slice(dash).replace(DIGEST_DASH, '');
+  const enumeration = explain.split(/,\s+/u).every(part => part.split(/\s+/u).length <= 3);
+  return restore(`${head} — ${enumeration ? explain : cutWords(explain, DIGEST_EXPLAIN_CHARS)}`);
 }
 
 /**
  * Суть результата коллеги: по строке на пункт, заголовки разделов сохраняются.
- * Готовые строки маленькая модель переписывала к себе почти дословно, поэтому описания сокращаются (shortenLine),
+ * Готовые описания маленькая модель переписывала к себе почти дословно, поэтому они сокращаются (shortenLine),
  * а подсказка короче (на CPU каждый токен ~45 мс). Оговорки автора не переписываются, но и не теряются:
  * статус данных — факт, гипотеза или оценка — становится пометкой пункта («Латте — 4 € [гипотеза]»):
  * - «Допущение: 30 гостей в день» — сам пункт со статусом;
- * - «Допущение: цены ниже не проверены» — статус следующих пунктов до пустой строки или заголовка;
- * - «допущение: данные основаны на общем поведении» — статус предыдущих пунктов без своей пометки;
+ * - «Допущение: цены ниже не проверены» — статус следующих пунктов: до заголовка или до строки не из списка
+ *   после пустой строки, но не раньше, чем статус получит хотя бы один пункт;
+ * - «допущение: данные основаны на общем поведении», «Примечание: все данные — предположения» — статус
+ *   предыдущих пунктов без своей пометки;
  * - заголовок «Гипотезы:», «Оценка выручки:» — статус пунктов раздела.
  * Если слово статуса и так осталось в тексте пункта («примерно 2 700 €»), пометка не дублируется.
  */
@@ -659,23 +648,34 @@ export function handoffDigest(text) {
   const rows = [];
   let section;
   let next;
+  let nextUsed = false;
+  let gap = false;
   for (const raw of stripThink(text).split(/\r?\n/)) {
-    // «### Клиенты», «**Напитки**» — заголовки разделов (жирная строка с цитатой или точкой в конце — нет).
-    const bold = raw.match(/^\s*(\*\*|__)([^*_«"“\n]+?)\1\s*:?\s*$/u);
-    const heading = /^\s*#/u.test(raw) || Boolean(bold && !/[.!?]$/u.test(bold[2]));
     const line = raw.replace(/^\s*(?:(?:[-*•–]|\d+[.)])\s+)?/u, '').replace(/[*_#`]+/g, '').trim();
     if (!/[\p{L}\d]/u.test(line)) {
-      // Пустая строка или линия «---» после пунктов закрывает раздел и оговорку «ниже».
-      if (rows.at(-1)?.item) section = next = undefined;
+      // Пустая строка или линия «---»: что она закрывает, решает следующая строка.
+      gap = rows.length > 0;
       continue;
     }
-    const label = line.match(STATUS_LABEL);
-    const labelled = label ? statusOf(label[1], { label: true }) : undefined;
+    const listItem = /^\s*(?:[-*•–]|\d+[.)])\s+/u.test(raw);
+    if (gap && !listItem) {
+      // После пустой строки — уже не продолжение списка: раздел и использованная оговорка «ниже» закрыты.
+      section = undefined;
+      if (nextUsed) next = undefined;
+    }
+    gap = false;
+    const note = line.match(NOTE_LABEL);
+    const label = line.match(STATUS_LABEL) || (note && statusOf(line.slice(note[0].length)) ? note : null);
+    const labelled = label ? statusOf(label === note ? line.slice(note[0].length) : label[0], { label: true }) : undefined;
     const content = label ? line.slice(label[0].length).trim() : line;
+    // «### Клиенты», «**Напитки**» — заголовки; жирная строка с данными, пометкой статуса, цитатой или точкой — пункт.
+    const bold = raw.match(/^\s*(\*\*|__)([^*_«"“\n]+?)\1\s*:?\s*$/u);
+    const heading = /^\s*#/u.test(raw) || Boolean(bold && !/\d/u.test(bold[2]) && !/[.!?]$/u.test(bold[2]) && !(label && content));
     if (!content || heading || /:$/.test(content)) {
-      // Заголовок раздела: «Гипотезы:» задаёт статус пунктов, «Напитки:» — сбрасывает.
+      // Заголовок раздела: «Гипотезы:» задаёт статус пунктов, «Напитки:» — сбрасывает. Оговорка «ниже» переживает
+      // заголовок сразу после себя.
       section = labelled || statusOf(content);
-      next = undefined;
+      if (nextUsed) next = undefined;
       if (content) rows.push({ header: content.replace(/:$/u, '') });
       continue;
     }
@@ -685,15 +685,17 @@ export function handoffDigest(text) {
       for (const r of before) r.status = cautious(r.status, labelled);
     } else if (about) {
       next = labelled;
+      nextUsed = false;
     }
     if (about) {
       for (const r of rows) r.closed = true;
-      // Оговорка — о других строках; своё содержание передаётся, только если в нём есть цифры или условия.
-      if (!DIGEST_KEEP.test(content)) continue;
+      // Оговорка — о других строках; своё содержание передаётся, только если в нём есть данные.
+      if (!DIGEST_DATA.test(content)) continue;
     }
     // Своя пометка и раздел («Факты:») сильнее общей оговорки, но осторожное слово в тексте сильнее пометки:
     // «Факт: возможно 30 гостей» — гипотеза.
     const inline = statusOf(content);
+    if (!labelled && next) nextUsed = true;
     rows.push({
       item: content[0].toUpperCase() + content.slice(1),
       own: Boolean(labelled || section),
@@ -708,12 +710,33 @@ export function handoffDigest(text) {
   }).join('\n');
 }
 
+// Своя часть источника по заголовку раздела. Маленькая модель пишет и чужие разделы («Клиенты» у продуктолога),
+// а лимит подсказки уходил на них: если раздел своей роли есть, коллеге передаётся только он (и другие свои разделы).
+// Без своих разделов (короткий ответ, другие заголовки) — сводка целиком.
+const OWN_SECTION = {
+  research: /клиент|аудитор|сегмент/iu,
+  product: /напит|меню|ассортимент/iu,
+  creator: /слоган|креатив|бренд/iu,
+  sales: /привлеч|продаж|продвиж|маркетинг|канал/iu,
+  finance: /выручк|финанс|доход|расход|бюджет|прибыл/iu
+};
+
+function ownSections(agentId, digest) {
+  const sections = [];
+  for (const line of digest.split('\n')) {
+    if (!line.startsWith('- ') || !sections.length) sections.push([]);
+    sections.at(-1).push(line);
+  }
+  const own = sections.filter(s => !s[0].startsWith('- ') && s.length > 1 && OWN_SECTION[agentId]?.test(s[0]));
+  return own.length ? own.flat().join('\n') : digest;
+}
+
 export function compactHandoffs(outcomes, { perSource = HANDOFF_SOURCE_CHARS, total = HANDOFF_TOTAL_CHARS } = {}) {
   const handoffs = [];
   let left = total;
   for (const outcome of outcomes) {
     // Маркеры подсказки в чужом тексте не должны выглядеть как новое задание.
-    const text = handoffDigest(outcome?.result).replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
+    const text = ownSections(outcome?.agentId, handoffDigest(outcome?.result)).replace(/ТВО[ЁЕ]\s+(?:ЗАДАНИЕ|ЗАДАЧА)\s*:/giu, 'задание:');
     if (!text || left < 80) continue;
     const clipped = clipLines(text, Math.min(perSource, left));
     handoffs.push({ agentId: outcome.agentId, text: clipped });
@@ -778,13 +801,12 @@ const STUB_REPLY = new RegExp(String.raw`^${STUB_WORD}(?:\s+${STUB_WORD})*$`, 'i
 // Проверяется после удаления разметки и знаков («**Luma 3**, хорошо» → «Luma 3 хорошо»).
 const LEADING_ADDRESS = /^(?:luma|люма)\s*[1-6](?!\d)/iu;
 
-// Вопрос или возражение: на них хватает одного своего слова («Почему?», «А утром?», «Но не вечером»).
-const ASK_OR_OBJECT = /\?|(?<!\p{L})(?:но|однако|а\s+не|нет|лучше|вместо)(?!\p{L})/iu;
-
-// Своё после цитаты: новое число, вопрос или возражение хотя бы из одного своего слова, утверждение — из двух.
+// Своё после цитаты: новое число; свой вопрос или возражение хотя бы с одним своим словом («Почему?», «А утром?»,
+// «Не согласен, утром»); утверждение — из двух своих слов. Пустой хвост («Звучит логично», «Именно так?») — пересказ.
 function addsToQuote(reply, sources) {
-  const own = novelWords(reply, sources);
-  return own.some(word => /\d/u.test(word)) || own.length >= (ASK_OR_OBJECT.test(reply) ? 1 : 2);
+  const own = ownPart(reply, sources);
+  const asks = /\?["»”')\]]*$/u.test(reply) && own.endsOwn;
+  return own.number || own.words.length >= (asks || own.objects ? 1 : 2);
 }
 
 /**

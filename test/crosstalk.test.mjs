@@ -135,7 +135,16 @@ test('cleanChatReply: цитата коллеги перед вопросом, �
   // Короткий вопрос или возражение после цитаты — своё; согласие или подтверждение после цитаты — нет.
   const quote = 'Luma 2, группа взрослых — предпочитают спокойные и уютные варианты, часто приходят вечером';
   for (const tail of ['Почему?', 'А утром?', 'Но не вечером.']) assert.equal(kept(`${quote}. ${tail}`, 'product'), `${quote}. ${tail}`);
-  for (const tail of ['Да, полностью согласен.', 'Ты прав, верно.']) assert.equal(kept(`${quote}. ${tail}`, 'product'), undefined);
+  for (const tail of ['Да, полностью согласен.', 'Ты прав, верно.', 'Звучит логично.', 'Отличная работа, коллега.', 'Это очень интересно.', 'Правда?', 'Именно так?']) {
+    assert.equal(kept(`${quote}. ${tail}`, 'product'), undefined, tail);
+  }
+  assert.equal(kept(`${quote}, это важная информация.`, 'product'), undefined);
+  assert.equal(kept(`${quote}. Не согласен, утром.`, 'product'), `${quote}. Не согласен, утром.`, '«не согласен» — возражение');
+  // «но», «лучше», «нет» внутри цитаты — не своё возражение; «Luma2» и «пункт 2» — не новое число.
+  const product = 'Капучино — 3 €, классика для студентов, но лучше брать утром.';
+  assert.equal(cleanChatReply('Luma 3, капучино — 3 €, классика для студентов, но лучше брать утром. Супер.', 'sales', ALL, { sources: [product] }), null);
+  assert.equal(kept(`Luma2, ${quote.slice('Luma 2, '.length)}`, 'product'), undefined);
+  assert.equal(kept(`Luma 2, пункт 2: ${quote.slice('Luma 2, '.length)}`, 'product'), undefined);
   // Голое согласие — заглушка.
   assert.equal(cleanChatReply('Luma 3, согласен с тобой.', 'sales', ALL), null);
   assert.equal(cleanChatReply('Luma 3, ты прав, полностью согласен.', 'sales', ALL), null);
