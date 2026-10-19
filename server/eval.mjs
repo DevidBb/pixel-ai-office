@@ -79,7 +79,7 @@ const REALITY = {
       'вод(?:а|ы|у|ой|е)(?!\\p{L})']),
     // Еда и посуда в названии («Шоколадный торт», «Чайная ложка») — не напиток, даже если в названии есть «шоколад» или «кофе».
     unrealName: words(['шаурм', 'бургер', 'пицц', 'торт(?:ы|а|ик)?(?!\\p{L})', 'кекс', 'пирог', 'печень', 'круассан', 'булоч', 'сэндвич', 'бутерброд',
-      'салат', 'оливье', 'чизкейк', 'маффин', 'ложк', 'машин', 'кофейник', 'чайник']),
+      'салат', 'оливье', 'чизкейк', 'маффин', 'макарон', 'десерт', 'ложк', 'машин', 'кофейник', 'чайник']),
     // Алкоголь где угодно в пункте — не для кофейни у университета; «без алкоголя», «без сахара и алкоголя» не считаются.
     unreal: new RegExp(String.raw`(?<!(?:без|не)\s+(?:\p{L}+\s+)?(?:\p{L}+(?:\s*,\s*|\s+(?:и|или)\s+)){0,3})${WORD}(?:вин(?:о|а|у|ом|е)(?!\p{L})|винн|пив|алкогол|коньяк|ликёр|ликер|ром(?:а|у|ом|е)?(?!\p{L})|виски|водк|шампанск)`, 'iu')
   },
@@ -155,6 +155,9 @@ const CHECKS = {
   }
 };
 
+// qwen2.5:3b иногда переходит на китайский посреди ответа («Чай с лимоном —清新而爽口的选择»): такой ответ не засчитывается.
+const ALIEN_SCRIPT = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u;
+
 /**
  * Оценка одного прогона по событиям задачи (/api/runs/:id).
  * Возвращает по сотрудникам: выполнено ли задание, писал ли за других, обрезан ли ответ, время — и общий балл.
@@ -168,18 +171,19 @@ export function scoreCoffeeRun(events) {
   const results = new Map(events.filter(e => e.type === 'agent-result').map(e => [e.agentId, e]));
   const agents = Object.entries(CHECKS).map(([agentId, { label, check }]) => {
     const event = results.get(agentId);
-    if (!event) return { agentId, label, ok: false, detail: 'нет результата', reality: null, foreign: [], truncated: false, seconds: null, tokens: null };
+    if (!event) return { agentId, label, ok: false, detail: 'нет результата', reality: null, foreign: [], truncated: false, alien: false, seconds: null, tokens: null };
     const { ok, detail } = check(event.result);
     return {
       agentId, label, ok, detail,
       reality: realityCheck(agentId, event.result),
       foreign: event.foreign || [],
       truncated: event.stats?.doneReason === 'length',
+      alien: ALIEN_SCRIPT.test(event.result),
       seconds: event.stats?.totalMs ? Math.round(event.stats.totalMs / 100) / 10 : null,
       tokens: event.stats?.outputTokens ?? null
     };
   });
-  const passed = agents.filter(a => a.ok && !a.foreign.length && !a.truncated).length;
+  const passed = agents.filter(a => a.ok && !a.foreign.length && !a.truncated && !a.alien).length;
   const first = events[0]?.at;
   const last = events.at(-1)?.at;
   const checked = agents.map(a => a.reality).filter(Boolean);

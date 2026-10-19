@@ -269,3 +269,18 @@ test('реальность: «Напиток: Кофе капучино» — к
   const ways = '1. Способ привлечения: создание специальных предложений для студентов университета\n2. Способ привлечения: организация кофееночных вечеров для студентов';
   assert.equal(realityCheck('sales', ways).real, 2);
 });
+
+// Настоящие ответы qwen2.5:3b (правило + форма списка).
+test('оценка: ответ с иероглифами не засчитывается; «Кофе-макароны — десерт» не напиток', () => {
+  const results = AFTER.map(r => r.agentId === 'product' ? { ...r, result: '1. Кофе с молоком — классика.\n2. Чай с лимоном —清新而爽口的选择，适合夏季。\n3. Эспрессо с молоком — насыщенный.' } : r);
+  const report = scoreResults(results);
+  assert.equal(report.agents.find(a => a.agentId === 'product').alien, true);
+  assert.equal(report.passed, 4);
+  assert.deepEqual(realityCheck('product', '1. Эспрессо — классика.\n2. Кофе-макароны — легкий десерт для завтрака.').unreal, ['Кофе-макароны']);
+});
+
+test('подсказка: допущения помечаются, сам результат — нет (креатор писал «допущение: "Кофеин для умов"»)', () => {
+  const plan = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
+  const [, user] = agentMessages(AGENTS.find(a => a.id === 'creator'), plan.tasks.find(t => t.agentId === 'creator'), plan);
+  assert.match(user.content, /сам результат так не помечай/);
+});
