@@ -37,10 +37,11 @@ try {
     while (run.status === 'running') await new Promise(resolve => setTimeout(resolve, 200));
     const report = scoreCoffeeRun(run.events);
     reports.push({ ...report, results: run.events.filter(e => e.type === 'agent-result').map(e => ({ agentId: e.agentId, result: e.result })) });
-    console.log(`\nПрогон ${i}: ${report.passed}/${report.total} заданий выполнено · ${report.seconds} с`);
+    console.log(`\nПрогон ${i}: ${report.passed}/${report.total} заданий выполнено · реальных вариантов ${report.reality.real}/${report.reality.total} · ${report.seconds} с`);
     for (const a of report.agents) {
       const flags = [a.foreign.length ? `пишет за ${a.foreign.join(', ')}` : '', a.truncated ? 'обрезан' : ''].filter(Boolean).join('; ');
-      console.log(`  ${a.ok && !flags ? '✅' : '❌'} ${a.agentId.padEnd(8)} ${a.label.padEnd(44)} ${a.detail}${flags ? ` · ${flags}` : ''} · ${a.seconds ?? '—'} с, ${a.tokens ?? '—'} ток.`);
+      const real = a.reality ? ` · реально ${a.reality.real}/${a.reality.total}${a.reality.unreal.length ? ` (нет в жизни: ${a.reality.unreal.join('; ')})` : ''}` : '';
+      console.log(`  ${a.ok && !flags ? '✅' : '❌'} ${a.agentId.padEnd(8)} ${a.label.padEnd(44)} ${a.detail}${flags ? ` · ${flags}` : ''}${real} · ${a.seconds ?? '—'} с, ${a.tokens ?? '—'} ток.`);
     }
   }
 } finally {
@@ -49,11 +50,12 @@ try {
 
 const passed = reports.reduce((sum, r) => sum + r.passed, 0);
 const total = reports.reduce((sum, r) => sum + r.total, 0);
+const reality = { real: reports.reduce((sum, r) => sum + r.reality.real, 0), total: reports.reduce((sum, r) => sum + r.reality.total, 0) };
 const avgSeconds = Math.round(reports.reduce((sum, r) => sum + (r.seconds || 0), 0) / reports.length);
-console.log(`\nИТОГО: ${passed}/${total} (${Math.round((passed / total) * 100)} %) · в среднем ${avgSeconds} с на прогон`);
+console.log(`\nИТОГО: ${passed}/${total} (${Math.round((passed / total) * 100)} %) · реальных вариантов ${reality.real}/${reality.total} · в среднем ${avgSeconds} с на прогон`);
 
 const dir = join(config.dataDir || join(rootDir, 'data'), 'evals');
 mkdirSync(dir, { recursive: true });
 const file = join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-${config.model.replace(/[^\w.-]+/g, '_')}.json`);
-writeFileSync(file, JSON.stringify({ model: config.model, provider: config.provider, label, passed, total, avgSeconds, reports }, null, 2));
+writeFileSync(file, JSON.stringify({ model: config.model, provider: config.provider, label, passed, total, reality, avgSeconds, reports }, null, 2));
 console.log(`Сохранено: ${file}`);

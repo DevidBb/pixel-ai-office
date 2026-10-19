@@ -17,12 +17,93 @@ const LIST_MARKER = /^(\s*)(?:[-*•–]|\d+[.)])\s+(.*)$/u;
  * Вложенные пояснения (с большим отступом), заголовки вида «**3 группы:**» и пометки «допущение» не считаются.
  */
 export function countListItems(text) {
-  const items = text.split(/\r?\n/).map(line => line.match(LIST_MARKER)).filter(Boolean)
-    .map(([, indent, body]) => ({ indent: indent.replace(/\t/g, '    ').length, body: body.trim() }))
-    .filter(({ body }) => body && !/^[*_\s]*допущени/iu.test(body));
-  if (!items.length) return 0;
-  const top = Math.min(...items.map(item => item.indent));
-  return items.filter(item => item.indent === top).length;
+  return listItems(text).length;
+}
+
+const isNote = body => /^[*_\s]*допущени/iu.test(body);
+
+/**
+ * Пункты списка верхнего уровня с продолжением: «1. Группы клиентов\nГруппа студентов — …» → один пункт из двух строк;
+ * вложенные пояснения входят в пункт, но не считаются отдельными. Пункт завершают строка «допущение» и текст
+ * без отступа после пустой строки («Итого: …» после списка).
+ */
+export function listItems(text) {
+  const lines = text.split(/\r?\n/);
+  const marked = lines.map(line => line.match(LIST_MARKER))
+    .map(match => match && { indent: match[1].replace(/\t/g, '    ').length, body: match[2].trim() });
+  const real = marked.filter(item => item && item.body && !isNote(item.body));
+  if (!real.length) return [];
+  const top = Math.min(...real.map(item => item.indent));
+  const items = [];
+  let open = false;
+  lines.forEach((line, i) => {
+    const item = marked[i];
+    if (item && item.indent === top) {
+      open = Boolean(item.body) && !isNote(item.body);
+      items.push(open ? [item.body] : null);
+      return;
+    }
+    const body = item ? item.body : line.trim();
+    if (!open || !body) return;
+    if (isNote(body) || (!item && !/^\s/.test(line) && !lines[i - 1].trim())) {
+      open = false;
+      return;
+    }
+    items.at(-1).push(body);
+  });
+  return items.filter(Boolean);
+}
+
+// Реалистичность: существует ли названное в настоящей жизни. Форма может быть верной («3 напитка»),
+// а сами напитки — «Смешанник из вина» и «Молочный шаурма». Словари — для задачи кофейни у университета.
+const WORD = String.raw`(?<!\p{L})`;
+const words = list => new RegExp(`${WORD}(?:${list.join('|')})`, 'iu');
+const REALITY = {
+  research: {
+    scope: 'name',
+    real: words(['студент', 'преподавател', 'сотрудник', 'работник', 'персонал', 'абитуриент', 'аспирант', 'магистрант', 'школьник',
+      'жител', 'сосед', 'офисн', 'фрилансер', 'родител', 'профессор', 'учён', 'учен', 'турист', 'пенсионер', 'курьер', 'спортсмен'])
+  },
+  product: {
+    scope: 'name',
+    real: words(['эспрессо', 'американо', 'капучино', 'латте', 'раф(?:а|у|ом|е|ы)?(?!\\p{L})', 'флэт', 'флет', 'мокк', 'мокачино', 'макиато', 'маккиато',
+      'кортадо', 'лунго', 'ристретто', 'колд[- ]?брю', 'cold brew', 'фраппе', 'фраппучино', 'глясе', 'бамбл', 'кофе', 'какао',
+      'горяч\\p{L}* шоколад', 'шоколад', 'ча(?:й|я|ю|ем?|и)(?!\\p{L})', 'чайн(?:ый|ая|ое|ые|ого|ой|ую|ым|ом)(?!\\p{L})', 'матча', 'пуэр', 'улун',
+      'каркаде', 'сбитень', 'цикори', 'лимонад', 'смузи', 'морс', 'сок(?:и|а|ов|ом|у|е)?(?!\\p{L})', 'фреш', 'милкшейк', 'молочн\\p{L}* коктейл',
+      'вод(?:а|ы|у|ой|е)(?!\\p{L})']),
+    // Еда в названии («Шоколадный торт», «Молочный шаурма») — не напиток, даже если в названии есть «шоколад» или «кофе».
+    unrealName: words(['шаурм', 'бургер', 'пицц', 'торт(?:ы|а|ик)?(?!\\p{L})', 'кекс', 'пирог', 'печень', 'круассан', 'булоч', 'сэндвич', 'бутерброд',
+      'салат', 'оливье', 'чизкейк', 'маффин']),
+    // Алкоголь где угодно в пункте — не для кофейни у университета; «без алкоголя» не считается.
+    unreal: new RegExp(String.raw`(?<!(?:без|не)\s+(?:\p{L}+\s+)?)${WORD}(?:вин(?:о|а|у|ом|е)(?!\p{L})|винн|пив|алкогол|коньяк|ликёр|ликер|ром(?:а|у|ом|е)?(?!\p{L})|виски|водк|шампанск)`, 'iu')
+  },
+  sales: {
+    scope: 'line',
+    real: words(['соцсет', 'социальн\\p{L}* сет', 'инстаграм', 'instagram', 'вконтакт', 'вк(?!\\p{L})', 'vk', 'телеграм', 'telegram', 'тикток', 'tiktok',
+      'ютуб', 'youtube', 'листов(?:к|ок)', 'флаер', 'плакат', 'афиш', 'объявлени', 'визит(?:к|ок)', 'баннер', 'вывес(?:к|ок)', 'штендер', 'скид(?:к|ок)', 'акци',
+      'лояльност', 'бонус', 'промокод', 'купон', 'абонемент', 'студенческ', 'партн[её]р', 'сотрудничеств', 'дегустац', 'пробн', 'бесплатн',
+      'мероприяти', 'конкурс', 'розыгрыш', 'викторин', 'квиз', 'ярмар(?:к|ок)', 'фестивал', 'рассыл', 'отзыв', '2гис', '2gis', 'яндекс', 'сарафан', 'рекомендац', 'достав', 'стенд', 'реклам', 'сми'])
+  }
+};
+
+// «Группа студентов», «Группа: студенты», «Группа 1 — …», «Способ привлечения: …», «Группы клиентов» — подпись пункта,
+// а не его содержание.
+const ITEM_LABEL = /^(?:групп\p{L}*(?:\s+клиент\p{L}*)?|способ\p{L}*(?:\s+привлечени\p{L}*)?)(?:\s*№?\s*\d+)?(?=[\s:—–-]|$)\s*[:—–-]?\s*/iu;
+
+/** Что пункт называет: «**Капучино** – классика» → «Капучино»; для 'line' — вся первая строка. */
+function itemName(lines, scope) {
+  const text = lines.map(line => line.replace(/[*_«»"“”]/g, '').replace(ITEM_LABEL, '').trim()).find(Boolean) || '';
+  return scope === 'line' ? text : text.split(/\s+[—–-]\s+|[:(,.]/u)[0].trim();
+}
+
+/** Сколько пунктов ответа называют существующее; null — для роли нет словаря (слоган, расчёт). */
+export function realityCheck(agentId, text) {
+  const rule = REALITY[agentId];
+  if (!rule) return null;
+  const items = listItems(text).map(lines => ({ name: itemName(lines, rule.scope), text: lines.join(' ') }));
+  const unreal = items.filter(item => !rule.real.test(item.name) || rule.unrealName?.test(item.name) || rule.unreal?.test(item.text))
+    .map(item => item.name || '—');
+  return { real: items.length - unreal.length, total: items.length, unreal };
 }
 
 const QUOTE = String.raw`(?:«[^»\n]{3,}»|"[^"\n]{3,}"|“[^”\n]{3,}”)`;
@@ -81,10 +162,11 @@ export function scoreCoffeeRun(events) {
   const results = new Map(events.filter(e => e.type === 'agent-result').map(e => [e.agentId, e]));
   const agents = Object.entries(CHECKS).map(([agentId, { label, check }]) => {
     const event = results.get(agentId);
-    if (!event) return { agentId, label, ok: false, detail: 'нет результата', foreign: [], truncated: false, seconds: null, tokens: null };
+    if (!event) return { agentId, label, ok: false, detail: 'нет результата', reality: null, foreign: [], truncated: false, seconds: null, tokens: null };
     const { ok, detail } = check(event.result);
     return {
       agentId, label, ok, detail,
+      reality: realityCheck(agentId, event.result),
       foreign: event.foreign || [],
       truncated: event.stats?.doneReason === 'length',
       seconds: event.stats?.totalMs ? Math.round(event.stats.totalMs / 100) / 10 : null,
@@ -94,5 +176,7 @@ export function scoreCoffeeRun(events) {
   const passed = agents.filter(a => a.ok && !a.foreign.length && !a.truncated).length;
   const first = events[0]?.at;
   const last = events.at(-1)?.at;
-  return { agents, passed, total: agents.length, seconds: first && last ? Math.round((last - first) / 100) / 10 : null };
+  const checked = agents.map(a => a.reality).filter(Boolean);
+  const reality = { real: checked.reduce((sum, r) => sum + r.real, 0), total: checked.reduce((sum, r) => sum + r.total, 0) };
+  return { agents, passed, total: agents.length, reality, seconds: first && last ? Math.round((last - first) / 100) / 10 : null };
 }

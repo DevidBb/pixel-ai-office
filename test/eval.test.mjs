@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { countListItems, countSlogans, scoreResults } from '../server/eval.mjs';
+import { countListItems, countSlogans, realityCheck, scoreResults } from '../server/eval.mjs';
 import { arithmeticHints, requestedCount, requestedItems, agentMessages, buildPlan, routeByRules, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
@@ -180,4 +180,63 @@ test('оценка финансиста: 30 и 3 вне расчёта — вы�
 
 test('countListItems: пункт с двоеточием и вложенными пояснениями считается', () => {
   assert.equal(countListItems('1. Студенты:\n   - ценят цену\n2. Преподаватели:\n   - ценят тишину\n3. Сотрудники:\n   - заходят утром'), 3);
+});
+
+test('реальность: выдуманные напитки из настоящего прогона qwen3:1.7b не засчитываются', () => {
+  const drinks = '1. Капучино – популярный и удобный вариант.\n2. Смешанник – сочетание вина и напитка.\n3. Иллюстрированный напиток – уникальный выбор.\n\nдопущение: варианты могут быть разными.';
+  assert.deepEqual(realityCheck('product', drinks), { real: 1, total: 3, unreal: ['Смешанник', 'Иллюстрированный напиток'] });
+  assert.deepEqual(realityCheck('product', '1. Молочный шаурма — нежный напиток.\n2. Коктейль – разнообразный выбор.\n3. Чай – натуральный.').unreal, ['Молочный шаурма', 'Коктейль']);
+});
+
+test('реальность: алкоголь в напитке — нет, «без алкоголя» — да', () => {
+  assert.equal(realityCheck('product', '1. Латте с вином — для вечера.').real, 0);
+  assert.equal(realityCheck('product', '1. **Раф** — сливочный, без алкоголя.').real, 1);
+  assert.equal(realityCheck('product', '1. Напиток с чаем и мятой.\n2. Какао с зефиром.').real, 2);
+});
+
+test('реальность: группа клиентов — конкретные люди; подпись пункта и продолжение на следующей строке', () => {
+  const groups = '1. Группы клиентов\nГруппа студентов — ценят качество.\nдопущение: студенты выбирают по цене.\n\n2. Группы клиентов\nГруппа взрослых — ценят уют.\n\n3. **Учёные/преподаватели** – ценят тишину.';
+  assert.deepEqual(realityCheck('research', groups), { real: 2, total: 3, unreal: ['взрослых'] });
+});
+
+test('реальность: способ привлечения — настоящий канал, а не пожелание', () => {
+  const ways = '1. Способ привлечения: размещение визиток в информационных кабинетах университета\n2. Создать атмосферу, привлекая внимание к местному сообществу';
+  assert.equal(realityCheck('sales', '1. Проведение конкурса «Лучший кофейник» с призом.').real, 1);
+  assert.deepEqual(realityCheck('sales', ways), { real: 1, total: 2, unreal: ['Создать атмосферу, привлекая внимание к местному сообществу'] });
+});
+
+test('реальность: для слогана и расчёта словаря нет; итог прогона — сумма по ролям', () => {
+  assert.equal(realityCheck('creator', 'Слоган: «Кофе между парами»'), null);
+  assert.equal(realityCheck('finance', 'Выручка: 90 €'), null);
+  assert.deepEqual(scoreResults(AFTER).reality, { real: 7, total: 8 });
+});
+
+test('подсказка: существующее просим у тех, кто называет варианты; креатору — без несуществующих слов, финансисту — ничего', () => {
+  const plan = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
+  const system = id => agentMessages(AGENTS.find(a => a.id === id), plan.tasks.find(t => t.agentId === id), plan)[0].content;
+  for (const id of ['research', 'product', 'sales']) assert.match(system(id), /только то, что уже существует/);
+  assert.doesNotMatch(system('finance'), /существ/);
+  assert.match(system('finance'), /продажи\. Пиши только свой результат/);
+  assert.doesNotMatch(system('creator'), /только то, что уже существует/);
+  assert.match(system('creator'), /без несуществующих слов/);
+});
+
+test('реальность: падежи и составные слова — виноград не вино, ром в любом падеже, чайник и торт не напитки', () => {
+  const product = text => realityCheck('product', text).real;
+  assert.equal(product('1. Лимонад с виноградом'), 1);
+  assert.equal(product('1. Кофе с ромом'), 0);
+  assert.equal(product('1. Чайник'), 0);
+  assert.equal(product('1. Шоколадный торт'), 0);
+  assert.equal(product('1. Кофейный кекс'), 0);
+  assert.equal(product('1. Капучино — хорошо с круассаном'), 1);
+  assert.equal(product('1. Напиток с соком\n2. Напиток с водой\n3. Напиток на основе рафа'), 3);
+});
+
+test('реальность: вложенные пояснения входят в пункт, текст после списка — нет', () => {
+  assert.equal(realityCheck('product', '1. Капучино\n   - Добавить коньяк').real, 0);
+  assert.equal(realityCheck('sales', '1. Способ привлечения:\n   - Раздача листовок').real, 1);
+  assert.equal(realityCheck('product', '1. Чай\n\nДопущение:\nВино в меню не включаем.').real, 1);
+  assert.equal(realityCheck('product', '1. Капучино\n\nИтого: эти напитки подходят к вину.').real, 1);
+  assert.equal(realityCheck('research', '1. Группа: студенты\n2. Группа 2 — преподаватели').real, 2);
+  assert.equal(countListItems('1. Капучино\n   - эспрессо\n   - молоко\n2. Чай'), 2);
 });
