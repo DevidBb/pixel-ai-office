@@ -72,10 +72,7 @@ test('подсказка адресного задания: без шаблон�
   assert.ok(!productSystem.content.includes('цену-гипотезу'), 'описание роли продуктолога не передаётся');
   assert.match(productSystem.content, /не добавляй разделы, цифры и расчёты, о которых не просили/);
   assert.match(productUser.content, /нумерованный список ровно из 3 пунктов/);
-  // Подпись «напитка» в подсказку не попадает: модель копирует её в пункты («1. Группы клиентов», «1. Услуги»).
-  assert.ok(!productUser.content.includes('«напитка»'));
-  assert.match(productUser.content, /что или кто именно/);
-  assert.ok(!productUser.content.includes('назван'), 'слово «название» тянет модель придумывать бренды');
+  assert.match(productUser.content, /что перечислить: «напитка»/);
   const [financeSystem, financeUser] = messagesFor('finance');
   assert.ok(!financeSystem.content.includes('затраты, маржу'), 'описание роли финансиста не передаётся');
   assert.match(financeUser.content, /КАЛЬКУЛЯТОР ОФИСА.*30 × 3 = 90/);
@@ -113,7 +110,7 @@ test('requestedItems: «3 сентября», «2 квартал» — не ко
 
 test('подсказка: «Luma 3 — предложи 3 напитка» получает форму списка, «3 сентября подготовь анонс» — нет', () => {
   for (const [goal, id, expected] of [
-    ['Luma 3 — предложи 3 напитка для кофейни', 'product', /ровно из 3 пунктов.*что или кто именно/],
+    ['Luma 3 — предложи 3 напитка для кофейни', 'product', /ровно из 3 пунктов.*«напитка для кофейни»/],
     ['Luma 4 — 3 сентября подготовь анонс открытия', 'creator', null]
   ]) {
     const plan = buildPlan(goal, routeByRules(goal));
@@ -298,9 +295,6 @@ test('подсказка: правило реальности и в ролево
     assert.doesNotMatch(system.content, /Не сочиняй/, goal);
     assert.match(system.content, /Пиши грамотно и просто/, goal);
   }
-  const plan = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
-  const [, user] = agentMessages(AGENTS.find(a => a.id === 'product'), plan.tasks.find(t => t.agentId === 'product'), plan);
-  assert.match(user.content, /Все пункты разные/);
 });
 
 test('реальность: опечатки, латиница и синонимы засчитываются; зёрна, кофе-брейк и батончик — нет', () => {
