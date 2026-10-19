@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { countListItems, countSlogans, echo, scoreResults, scoreTeamRun } from '../server/eval.mjs';
+import { countListItems, countSlogans, echo, scoreResults, scoreTeamRun, scoreTeamEval, teamPartDone, foreignSections, numberUse, receivedBlocks } from '../server/eval.mjs';
 import { arithmeticHints, requestedCount, requestedItems, agentMessages, buildPlan, routeByRules, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
@@ -228,4 +228,71 @@ test('scoreTeamRun: повторы в результатах считаются 
   const repeated = scoreTeamRun([...events, { type: 'agent-chat', agentId: 'creator', text: 'Luma 3, сколько стоит латте на овсяном и берут ли его вечером?', at: 7000 }]);
   assert.equal(repeated.chat.at(-1).echo, true);
   assert.deepEqual([report.copiedLines, report.copiedAssumptions, report.chatEchoes, report.chatReplies], [2, 1, 1, 2]);
+});
+
+// --- Оценка для сравнения версий (scripts/eval-team.mjs --rescore) ---
+
+test('teamPartDone и foreignSections: своя часть ролевой задачи и разделы о чужих частях', () => {
+  const product = '### Клиенты\n- Студенты\n### Напитки\n- Латте — 4 €\n- Капучино — 3 €\n### Слоган\n«Кофе между парами»';
+  assert.equal(teamPartDone('product', product), true);
+  assert.deepEqual(foreignSections('product', product), ['research', 'creator']);
+  assert.deepEqual(foreignSections('product', '1. Латте — 4 €\n2. Капучино — 3 €'), []);
+  assert.equal(teamPartDone('creator', 'Слоган: «Кофе между парами»'), true);
+  assert.equal(teamPartDone('creator', 'Слоган должен быть простым.'), false);
+  assert.equal(teamPartDone('finance', 'Выручка в первый месяц: 30 × 3 € × 30 = 2 700 €'), true);
+  assert.equal(teamPartDone('finance', 'Выручка зависит от продаж.'), false);
+  assert.equal(teamPartDone('sales', '1. Листовки у входа\n2. Скидка 10 % студентам'), true);
+  assert.equal(teamPartDone('research', 'Студенты и преподаватели.'), true);
+});
+
+test('numberUse: числа коллеги со статусом гипотезы — сохранена ли оговорка у того, кто их взял', () => {
+  const product = 'Допущение: цены ниже — гипотезы, их ещё не проверяли.\nКапучино — 3 €\nЛатте — 4 €';
+  assert.deepEqual(numberUse('Выручка: 30 гостей × 3 € = 90 €', [product]), { taken: 1, hedged: 1, kept: 0, lost: ['3'] });
+  assert.deepEqual(numberUse('Выручка (допущение: цены Luma 3): 30 × 3 € = 90 €', [product]), { taken: 1, hedged: 1, kept: 1, lost: [] });
+  assert.deepEqual(numberUse('- Латте — 4 € [гипотеза]', [product]), { taken: 1, hedged: 1, kept: 1, lost: [] });
+  // Без оговорки у коллеги — число просто взято.
+  assert.deepEqual(numberUse('Выручка: 30 × 3 € = 90 €', ['Капучино — 3 €']), { taken: 1, hedged: 0, kept: 0, lost: [] });
+  assert.deepEqual(numberUse('Выручка 2 700 € в месяц', ['примерно 2 700 € в месяц']), { taken: 1, hedged: 1, kept: 0, lost: ['2700'] });
+  // Статус — по исходному ответу коллеги, даже если в подсказку дошла строка без оговорки.
+  assert.deepEqual(numberUse('Выручка: 30 × 3 € = 90 €', ['- Капучино — 3 €'], { status: [product] }), { taken: 1, hedged: 1, kept: 0, lost: ['3'] });
+  assert.deepEqual(numberUse('Выручка: 30 × 3 € = 90 €', ['- Латте — 4 €'], { status: [product] }), { taken: 0, hedged: 0, kept: 0, lost: [] }, 'числа, которого не получил, не взял');
+});
+
+test('receivedBlocks: данные коллег из подсказки', () => {
+  const prompt = 'ЦЕЛЬ ПОЛЬЗОВАТЕЛЯ:\nx\n\nДАННЫЕ ОТ КОЛЛЕГИ (Luma 2 · Исследователь рынка), используй как вход, не переписывай и не приписывай себе:\n- Студенты [гипотеза]\n- Преподаватели\n\nДАННЫЕ ОТ КОЛЛЕГИ (Luma 3 · Продуктолог), используй как вход:\n- Латте — 4 €\n\nСделай свою часть…';
+  assert.deepEqual(receivedBlocks(prompt), [{ agentId: 'research', text: '- Студенты [гипотеза]\n- Преподаватели' }, { agentId: 'product', text: '- Латте — 4 €' }]);
+  assert.deepEqual(receivedBlocks('ТВОЁ ЗАДАНИЕ:\nx'), []);
+  // Исходная версия передавала текст целиком — с пустыми строками внутри.
+  assert.deepEqual(receivedBlocks('ДАННЫЕ ОТ КОЛЛЕГИ (Luma 3 · Продуктолог), используй как вход:\n**Напитки**\n- Латте — 4 €\n\nДопущение: цены выше — гипотезы.…\n\nТВОЯ ЗАДАЧА:\nx'),
+    [{ agentId: 'product', text: '**Напитки**\n- Латте — 4 €\n\nДопущение: цены выше — гипотезы.…' }]);
+});
+
+test('scoreTeamEval: поручения, данные коллег, оговорки в подсказке и в ответе, реплики до и после фильтра, время', () => {
+  const product = 'Допущение: цены ниже — гипотезы.\n1. Капучино — 3 €\n2. Латте — 4 €';
+  const report = {
+    runId: 'r1',
+    events: [
+      { type: 'plan', at: 1 },
+      { type: 'agent-result', agentId: 'product', result: product, stats: { promptTokens: 100, outputTokens: 20 }, at: 1000 },
+      { type: 'agent-result', agentId: 'finance', result: 'Выручка в первый месяц: 30 × 3 € × 30 = 2 700 €', handoffFrom: ['product'], stats: { promptTokens: 300, outputTokens: 30 }, at: 3000 },
+      { type: 'final', at: 4000 },
+      { type: 'agent-chat', agentId: 'product', to: 'finance', text: 'Luma 6, сколько гостей в день?', at: 6000 },
+      { type: 'done', at: 7000 }
+    ],
+    calls: [
+      { label: 'r1/product', messages: [{ role: 'user', content: 'ТВОЯ ЗАДАЧА: x' }], text: product, stats: { promptTokens: 100, outputTokens: 20 } },
+      { label: 'r1/finance', messages: [{ role: 'user', content: 'ДАННЫЕ ОТ КОЛЛЕГИ (Luma 3 · Продуктолог), используй как вход:\n- Капучино — 3 € [гипотеза]\n- Латте — 4 € [гипотеза]\n\nТВОЯ ЗАДАЧА: y' }], text: 'x', stats: { promptTokens: 300, outputTokens: 30 } },
+      { label: 'r1/chat-product', messages: [], text: 'Luma 6, сколько гостей в день?', stats: { promptTokens: 50, outputTokens: 10 } },
+      { label: 'r1/chat-finance', messages: [], text: 'OK', stats: { promptTokens: 50, outputTokens: 2 } }
+    ]
+  };
+  const s = scoreTeamEval(report, 'team');
+  const finance = s.agents.find(a => a.agentId === 'finance');
+  assert.equal(finance.part, true);
+  assert.deepEqual(finance.numbers, { taken: 1, hedged: 1, kept: 0, lost: ['3'] }, 'взял гипотетическую цену как факт');
+  assert.deepEqual(finance.delivered, { taken: 2, hedged: 2, kept: 2, lost: [] }, 'в подсказке статус дошёл');
+  assert.deepEqual(s.chat.map(c => [c.agentId, c.shown]), [['product', 'Luma 6, сколько гостей в день?'], ['finance', null]]);
+  assert.deepEqual({ seconds: s.seconds, work: s.workSeconds, discussion: s.discussionSeconds, prompt: s.promptTokens, output: s.outputTokens },
+    { seconds: 7, work: 4, discussion: 3, prompt: 500, output: 62 });
+  assert.deepEqual([s.partsDone, s.agentsWithForeignSections, s.hedgedTaken, s.hedgedKept, s.hedgedDelivered, s.hedgedReceived], [2, 0, 1, 0, 2, 2]);
 });

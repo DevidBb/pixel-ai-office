@@ -115,8 +115,15 @@ function trigrams(words) {
 function echoLines(text) {
   return String(text || '').replace(/<think>[\s\S]*?(?:<\/think>|$)/giu, '').split(/\r?\n/)
     .map(line => line.trim().replace(/^(?:[-*•–]|\d+[.)])\s+/u, ''))
-    .map(line => ({ line, grams: trigrams(stems(line)) }))
-    .filter(({ grams }) => grams.length);
+    .map(line => {
+      const words = stems(line);
+      return { line, words, grams: trigrams(words) };
+    })
+    .filter(({ words }) => words.length);
+}
+
+function knownGrams(sources) {
+  return new Set(sources.flatMap(source => echoLines(source).flatMap(({ grams }) => grams)));
 }
 
 /**
@@ -124,12 +131,12 @@ function echoLines(text) {
  * copiedAssumption — среди списанных есть чужая пометка «допущение». share — доля всех троек текста, найденных в источниках.
  */
 export function echo(text, sources = []) {
-  const known = new Set(sources.flatMap(source => echoLines(source).flatMap(({ grams }) => grams)));
+  const known = knownGrams(sources);
   let total = 0;
   let found = 0;
   let copiedLines = 0;
   let copiedAssumption = false;
-  const lines = echoLines(text);
+  const lines = echoLines(text).filter(({ grams }) => grams.length);
   for (const { line, grams } of lines) {
     const hits = grams.filter(gram => known.has(gram)).length;
     total += grams.length;
@@ -140,6 +147,27 @@ export function echo(text, sources = []) {
     }
   }
   return { lines: lines.length, copiedLines, copiedAssumption, share: total ? Math.round((found / total) * 100) / 100 : 0 };
+}
+
+// Служебные слова, обращение, связки пересказа («ты пишешь, что …», «нужно уточнить») и согласие («да, полностью согласен»):
+// своим содержанием не считаются.
+const FILLER = new Set(['и', 'в', 'во', 'на', 'с', 'со', 'а', 'но', 'не', 'по', 'к', 'о', 'об', 'у', 'за', 'из', 'от', 'до', 'для',
+  'что', 'как', 'это', 'ты', 'вы', 'я', 'мы', 'он', 'она', 'они', 'его', 'ее', 'их', 'же', 'ли', 'бы', 'то', 'так', 'или', 'уже',
+  'еще', 'все', 'тебя', 'тебе', 'твой', 'твои', 'твоя', 'пишеш', 'пишет', 'говор', 'отмет', 'указа', 'нужно', 'надо', 'уточн',
+  'важно', 'luma', 'люма', 'да', 'нет', 'согла', 'полно', 'верно', 'прав', 'права', 'прави', 'точно', 'отлич', 'хорош', 'спаси',
+  'понял', 'ясно', 'ок', 'окей']);
+
+/**
+ * Свои слова текста: не входят в тройки слов, найденные в источниках, и не служебные.
+ * «Luma 2, группа взрослых … приходят вечером: во сколько именно?» → ['сколь', 'именн'] (основы по пять букв).
+ */
+export function novelWords(text, sources = []) {
+  const known = knownGrams(sources);
+  return echoLines(text).flatMap(({ words, grams }) => {
+    const copied = new Set();
+    grams.forEach((gram, i) => { if (known.has(gram)) [i, i + 1, i + 2].forEach(j => copied.add(j)); });
+    return words.filter((word, i) => !copied.has(i) && !FILLER.has(word) && !(/^\d$/u.test(word) && /^(?:luma|люма)$/u.test(words[i - 1])));
+  });
 }
 
 /**
@@ -168,5 +196,146 @@ export function scoreTeamRun(events) {
     chatReplies: chat.length,
     chatEchoes: chat.filter(c => c.echo).length,
     seconds: first && last ? Math.round((last - first) / 100) / 10 : null
+  };
+}
+
+// --- Оценка «живой команды» для сравнения версий (scripts/eval-team.mjs --rescore) -----------------
+// Всё считается по сохранённым событиям и вызовам модели, поэтому одинаково для любой версии кода.
+
+// Кто за какую часть ролевой задачи отвечает (TEAM_GOAL): по этим словам видно и чужие разделы в ответе.
+const TEAM_PARTS = {
+  research: { label: 'клиенты', section: /клиент|аудитор|сегмент/iu },
+  product: { label: 'напитки', section: /напит|меню|ассортимент/iu },
+  creator: { label: 'слоган', section: /слоган/iu },
+  sales: { label: 'первые гости', section: /привлеч|первых\s+гост|продвиж|маркетинг/iu },
+  finance: { label: 'выручка за месяц', section: /выручк|финанс|доход/iu }
+};
+const DRINKS = /кофе|капучино|латте|эспрессо|американо|раф|флэт|мокко|какао|чай|матча|лимонад|смузи|сок|фраппе|шоколад/giu;
+const ATTRACT = /скидк|акци|листовк|флаер|соцсет|инстаграм|телеграм|вконтакт|дегустац|бонус|лояльн|партн[её]р|мероприят|промокод|бесплатн|подар/giu;
+const CLIENTS = /студент|преподават|сотрудник|аспирант|жител|офис|гост|школьник|учител|посетител/giu;
+
+const distinct = (text, pattern) => new Set((text.match(pattern) || []).map(w => w.toLowerCase().slice(0, 5))).size;
+
+/** Выполнена ли своя часть ролевой задачи (форма, не качество идей) — для разбора вручную это только подсказка. */
+export function teamPartDone(agentId, text) {
+  switch (agentId) {
+    case 'research': return distinct(text, CLIENTS) >= 2;
+    case 'product': return distinct(text, DRINKS) >= 2;
+    case 'creator': return /«[^»\n]{3,}»|"[^"\n]{3,}"|“[^”\n]{3,}”/u.test(text);
+    case 'sales': return distinct(text, ATTRACT) >= 2;
+    case 'finance': return /выручк[^\n]{0,120}?\d[\d\s.,]*\s*(?:€|евро|руб|₽|\$|тыс)/iu.test(text) || /\d[\d\s.,]*\s*(?:€|евро|руб|₽|\$)[^\n]{0,60}выручк/iu.test(text);
+    default: return false;
+  }
+}
+
+/** Разделы ответа о чужих частях задачи («### Слоган» у продуктолога): сотрудник пишет за коллег. */
+export function foreignSections(agentId, text) {
+  const headers = text.split(/\r?\n/).filter(line => /^\s*(?:#+\s|\*\*[^*]+\*\*\s*:?\s*$|[^\s].{0,40}:\s*$)/u.test(line));
+  return [...new Set(headers.flatMap(line => Object.entries(TEAM_PARTS)
+    .filter(([id, part]) => id !== agentId && part.section.test(line)).map(([id]) => id)))];
+}
+
+// Оговорка о статусе: слово в строке или пометка из сводки.
+const HEDGE = /допущ|гипотез|предпол|примерн|приблизит|оценк|оценочн|прогноз|ориентировоч|около\s+\d|[~≈]\s*\d|не\s+провер|\[(?:гипотеза|оценка)\]/iu;
+// Общая оговорка обо всём ответе или блоке: «допущение: данные основаны…», «цены ниже — гипотезы».
+const GLOBAL_HEDGE = /^\W*(?:допущ|гипотез|предпол)[^\n]*(?:ниже|выше|данн|основан|цифр|цен|расч|вс[её])/imu;
+// Значимые числа: с валютой или процентом, либо из двух и более цифр («3 €», «10 %», «30», «2 700»).
+const NUMBER = /\d[\d   ]*(?:[.,]\d+)?(?=\s*(?:€|евро|руб|₽|\$|%))|\d{2,}(?:[   ]\d{3})*(?:[.,]\d+)?/gu;
+
+function numbersByLine(text) {
+  return String(text || '').split(/\r?\n/).map(line => ({
+    line,
+    numbers: [...new Set((line.match(NUMBER) || []).map(n => n.replace(/[\s  ]/gu, '').replace(',', '.')))]
+  }));
+}
+
+/** Числа источника со статусом «гипотеза/оценка»: в строке с оговоркой или при общей оговорке. */
+export function hedgedNumbers(text) {
+  const global = GLOBAL_HEDGE.test(text);
+  return new Set(numbersByLine(text).filter(({ line }) => global || HEDGE.test(line)).flatMap(({ numbers }) => numbers));
+}
+
+/**
+ * Как сотрудник обошёлся с числами коллег: taken — взял в свой ответ; hedged — из них со статусом
+ * гипотезы или оценки у коллеги; kept — у сотрудника тоже с оговоркой (в строке или общей); lost — подал как факт.
+ * sources — что сотрудник получил (данные из подсказки), status — исходные ответы коллег, по ним статус числа.
+ */
+export function numberUse(result, sources, { status = sources } = {}) {
+  const known = new Set(sources.flatMap(source => numbersByLine(source).flatMap(({ numbers }) => numbers)));
+  const hedged = new Set(status.flatMap(source => [...hedgedNumbers(source)]));
+  const global = GLOBAL_HEDGE.test(result);
+  const lines = numbersByLine(result);
+  const taken = new Set(lines.flatMap(({ numbers }) => numbers).filter(n => known.has(n)));
+  const use = { taken: taken.size, hedged: 0, kept: 0, lost: [] };
+  for (const n of taken) {
+    if (!hedged.has(n)) continue;
+    use.hedged++;
+    if (global || lines.some(({ line, numbers }) => numbers.includes(n) && HEDGE.test(line))) use.kept++;
+    else use.lost.push(n);
+  }
+  return use;
+}
+
+const AGENT_BY_NUMBER = { 2: 'research', 3: 'product', 4: 'creator', 5: 'sales', 6: 'finance' };
+
+/** Данные коллег из подсказки: блоки «ДАННЫЕ ОТ КОЛЛЕГИ (Luma N · …)…:\n…» до следующего блока или задания. */
+export function receivedBlocks(prompt) {
+  return [...String(prompt || '').matchAll(/ДАННЫЕ ОТ КОЛЛЕГИ \(Luma (\d)[^)]*\)[^\n]*:\n([\s\S]*?)(?=\n\n(?:ДАННЫЕ ОТ КОЛЛЕГИ|Сделай свою часть|ТВО[ЯЁ] ЗАДА)|$)/gu)]
+    .map(m => ({ agentId: AGENT_BY_NUMBER[m[1]], text: m[2] }));
+}
+
+const sumOf = (items, key) => items.reduce((total, item) => total + (item?.[key] || 0), 0);
+
+/**
+ * Полная оценка прогона для сравнения версий: поручения (своя часть ролевой задачи или проверка кофейни),
+ * чужие разделы, списанные строки, числа коллег и их оговорки — в подсказке (delivered) и в ответе (numbers),
+ * реплики до фильтра и после, время работы и обсуждения, токены.
+ */
+export function scoreTeamEval({ events, calls = [] }, goal = 'team') {
+  const team = scoreTeamRun(events);
+  const results = events.filter(e => e.type === 'agent-result');
+  const resultOf = id => results.find(e => e.agentId === id)?.result || '';
+  const coffee = goal === 'coffee' ? scoreCoffeeRun(events) : null;
+  const call = label => calls.find(c => c.label?.split('/').at(-1) === label);
+  const agents = team.agents.map(a => {
+    const result = resultOf(a.agentId);
+    const check = coffee?.agents.find(c => c.agentId === a.agentId);
+    const blocks = receivedBlocks(call(a.agentId)?.messages?.at(-1)?.content);
+    const delivered = blocks.map(b => numberUse(b.text, [resultOf(b.agentId)]));
+    return {
+      ...a,
+      part: coffee ? Boolean(check?.ok && !check.foreign.length && !check.truncated) : teamPartDone(a.agentId, result),
+      foreignSections: foreignSections(a.agentId, result),
+      // Совпадение с числом, которого в подсказке не было (обрезано), — не взятое у коллеги.
+      numbers: numberUse(result, blocks.length ? blocks.map(b => b.text) : a.handoffFrom.map(resultOf), { status: a.handoffFrom.map(resultOf) }),
+      delivered: blocks.length
+        ? { taken: sumOf(delivered, 'taken'), hedged: sumOf(delivered, 'hedged'), kept: sumOf(delivered, 'kept'), lost: delivered.flatMap(d => d.lost) }
+        : null
+    };
+  });
+  const shown = events.filter(e => e.type === 'agent-chat');
+  const chat = calls.filter(c => /\/chat-/u.test(c.label || '')).map(c => {
+    const agentId = c.label.split('/chat-').at(-1);
+    const reply = shown.find(e => e.agentId === agentId);
+    return { agentId, raw: c.text ?? null, shown: reply?.text ?? null, to: reply?.to };
+  });
+  const first = events[0]?.at;
+  const last = events.at(-1)?.at;
+  const final = events.find(e => e.type === 'final')?.at;
+  const seconds = (from, to) => (from && to ? Math.round((to - from) / 100) / 10 : null);
+  return {
+    ...team, agents, chat,
+    ...(coffee ? { coffee: { passed: coffee.passed, total: coffee.total } } : {}),
+    partsDone: agents.filter(a => a.part).length,
+    agentsWithForeignSections: agents.filter(a => a.foreignSections.length).length,
+    hedgedTaken: sumOf(agents.map(a => a.numbers), 'hedged'),
+    hedgedKept: sumOf(agents.map(a => a.numbers), 'kept'),
+    hedgedReceived: sumOf(agents.map(a => a.delivered), 'hedged'),
+    hedgedDelivered: sumOf(agents.map(a => a.delivered), 'kept'),
+    chatRaw: chat.length,
+    workSeconds: seconds(first, final),
+    discussionSeconds: seconds(final, last),
+    promptTokens: sumOf(calls.map(c => c.stats), 'promptTokens'),
+    outputTokens: sumOf(calls.map(c => c.stats), 'outputTokens')
   };
 }

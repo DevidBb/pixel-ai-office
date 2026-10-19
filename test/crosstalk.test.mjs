@@ -5,6 +5,7 @@ import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import { RunStore } from '../server/runs.mjs';
 import { AGENTS, chatMessages, chatPartner, cleanChatReply, CHAT_PEER_CHARS } from '../server/office.mjs';
+import { echo, ECHO_LINE_SHARE } from '../server/eval.mjs';
 import { reduceTask, resetTask, taskFromRun } from '../src/taskEvents.ts';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
@@ -112,6 +113,32 @@ test('cleanChatReply: пересказ результата коллеги не 
   assert.equal(cleanChatReply('Luma 2, исследователь рынка: результаты показывают, что студенты и преподаватели — основная аудитория для кофейни возле университета. Нужно уточнить цены.', 'sales', ALL, { sources: [research, said] }), null);
   assert.deepEqual(cleanChatReply('Luma 2, сколько взрослых приходит вечером? Под них сделаю десерты.', 'product', ALL, { sources: [research] }),
     { text: 'Luma 2, сколько взрослых приходит вечером? Под них сделаю десерты.', to: 'research' });
+});
+
+test('cleanChatReply: цитата коллеги перед вопросом, возражением, согласием с причиной или исправлением — реплика остаётся', () => {
+  const research = '1. Группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену.\n2. Группа взрослых — предпочитают спокойные и уютные варианты, часто приходят вечером.';
+  const finance = 'Выручка в первый месяц: 30 гостей в день × 3 € = 90 € в месяц, при стабильном потоке гостей.';
+  const kept = (text, speaker) => cleanChatReply(text, speaker, ALL, { sources: [research, finance] })?.text;
+  // В каждой реплике цитата — больше 60 % слов: прежний фильтр по одной доле повтора их выбрасывал.
+  for (const [text, speaker] of [
+    ['Luma 2, группа взрослых — предпочитают спокойные и уютные варианты, часто приходят вечером: во сколько именно?', 'product'],
+    ['Luma 2, группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену, но утром спешат.', 'sales'],
+    ['Luma 2, группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену: согласен, латте дешевле.', 'product'],
+    ['Luma 6, выручка в первый месяц: 30 гостей в день × 3 € = 90 € в месяц — нет, 2 700 €.', 'sales']
+  ]) {
+    assert.ok(echo(text, [research, finance]).share >= ECHO_LINE_SHARE, `пример проверяет цитату: ${text}`);
+    assert.equal(kept(text, speaker), text);
+  }
+  // Цитата без своего: подтверждение «верно?», общие «нужно уточнить» — пересказ.
+  assert.equal(kept('Luma 2, группа взрослых — предпочитают спокойные и уютные варианты, часто приходят вечером, верно?', 'product'), undefined);
+  assert.equal(kept('Luma 2, группа студентов — регулярные посетители, ценящие качественный вкус и доступную цену. Нужно уточнить цены.', 'sales'), undefined);
+  // Короткий вопрос или возражение после цитаты — своё; согласие или подтверждение после цитаты — нет.
+  const quote = 'Luma 2, группа взрослых — предпочитают спокойные и уютные варианты, часто приходят вечером';
+  for (const tail of ['Почему?', 'А утром?', 'Но не вечером.']) assert.equal(kept(`${quote}. ${tail}`, 'product'), `${quote}. ${tail}`);
+  for (const tail of ['Да, полностью согласен.', 'Ты прав, верно.']) assert.equal(kept(`${quote}. ${tail}`, 'product'), undefined);
+  // Голое согласие — заглушка.
+  assert.equal(cleanChatReply('Luma 3, согласен с тобой.', 'sales', ALL), null);
+  assert.equal(cleanChatReply('Luma 3, ты прав, полностью согласен.', 'sales', ALL), null);
 });
 
 test('reduceTask: agent-chat попадает в обсуждение, а не в результаты; resetTask очищает', () => {
