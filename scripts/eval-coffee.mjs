@@ -40,7 +40,7 @@ try {
     console.log(`\nПрогон ${i}: ${report.passed}/${report.total} заданий выполнено · реальных вариантов ${report.reality.real}/${report.reality.total} · ${report.seconds} с`);
     for (const a of report.agents) {
       const flags = [a.foreign.length ? `пишет за ${a.foreign.join(', ')}` : '', a.truncated ? 'обрезан' : '', a.alien ? 'не на русском' : ''].filter(Boolean).join('; ');
-      const real = a.reality ? ` · реально ${a.reality.real}/${a.reality.total}${a.reality.unreal.length ? ` (нет в жизни: ${a.reality.unreal.join('; ')})` : ''}` : '';
+      const real = a.reality ? ` · реально ${a.reality.real}/${a.reality.total}${a.reality.unreal.length ? ` (вне словаря: ${a.reality.unreal.join('; ')})` : ''}` : '';
       console.log(`  ${a.ok && !flags ? '✅' : '❌'} ${a.agentId.padEnd(8)} ${a.label.padEnd(44)} ${a.detail}${flags ? ` · ${flags}` : ''}${real} · ${a.seconds ?? '—'} с, ${a.tokens ?? '—'} ток.`);
     }
   }

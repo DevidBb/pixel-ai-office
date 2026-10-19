@@ -213,14 +213,14 @@ test('реальность: для слогана и расчёта словар
   assert.deepEqual(scoreResults(AFTER).reality, { real: 7, total: 8 });
 });
 
-test('подсказка: существующее просим у тех, кто называет варианты; креатору — без несуществующих слов, финансисту — ничего', () => {
+test('подсказка: существующее просим у тех, кто называет варианты; креатору — грамотно и просто, финансисту — ничего', () => {
   const plan = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
   const system = id => agentMessages(AGENTS.find(a => a.id === id), plan.tasks.find(t => t.agentId === id), plan)[0].content;
   for (const id of ['research', 'product', 'sales']) assert.match(system(id), /только то, что уже существует/);
   assert.doesNotMatch(system('finance'), /существ/);
   assert.match(system('finance'), /продажи\. Пиши только свой результат/);
   assert.doesNotMatch(system('creator'), /только то, что уже существует/);
-  assert.match(system('creator'), /без несуществующих слов/);
+  assert.match(system('creator'), /Пиши грамотно и просто/);
 });
 
 test('реальность: падежи и составные слова — виноград не вино, ром в любом падеже, чайник и торт не напитки', () => {
@@ -283,4 +283,37 @@ test('подсказка: допущения помечаются, сам рез
   const plan = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
   const [, user] = agentMessages(AGENTS.find(a => a.id === 'creator'), plan.tasks.find(t => t.agentId === 'creator'), plan);
   assert.match(user.content, /сам результат так не помечай/);
+});
+
+// Ревью sparring-partner.
+test('подсказка: правило реальности и в ролевом задании; творческое задание продуктолога — без запрета сочинять', () => {
+  const roleGoal = 'Запуск стартапа с нуля';
+  const rolePlan = buildPlan(roleGoal, routeByRules(roleGoal));
+  const product = rolePlan.tasks.find(t => t.agentId === 'product');
+  assert.match(agentMessages(AGENTS.find(a => a.id === 'product'), product, rolePlan)[0].content, /только то, что уже существует/);
+  for (const goal of ['Luma 3 — придумай одно название для нового фирменного напитка кофейни', 'Luma 3 — предложи 3 необычных напитка, которых нет у конкурентов']) {
+    const plan = buildPlan(goal, routeByRules(goal));
+    const [system] = agentMessages(AGENTS.find(a => a.id === 'product'), plan.tasks[0], plan);
+    assert.doesNotMatch(system.content, /Не сочиняй/, goal);
+    assert.match(system.content, /Пиши грамотно и просто/, goal);
+  }
+  const plan = buildPlan(COFFEE_GOAL, routeByRules(COFFEE_GOAL));
+  const [, user] = agentMessages(AGENTS.find(a => a.id === 'product'), plan.tasks.find(t => t.agentId === 'product'), plan);
+  assert.match(user.content, /Все пункты разные/);
+});
+
+test('реальность: опечатки, латиница и синонимы засчитываются; зёрна, кофе-брейк и батончик — нет', () => {
+  const real = (id, text) => realityCheck(id, `1. ${text}`).real;
+  for (const text of ['Капуччино — классика', 'Экспрессо — крепкий', 'Latte — нежный', 'Комбуча — чайный гриб', 'Безалкогольный мохито — освежает', 'Безалкогольный глинтвейн — зимой']) assert.equal(real('product', text), 1, text);
+  for (const text of ['Шоколадный батончик — перекус', 'Кофейные зёрна — обжарка', 'Кофе-брейк — перерыв', 'Ирландский кофе — со сливками', 'Глинтвейн — зимой']) assert.equal(real('product', text), 0, text);
+  for (const text of ['Молодёжь — 18–25 лет', 'Первокурсники — новые', 'Выпускники — встречи', 'Первая группа — студенты', 'Сегмент 1: студенты']) assert.equal(real('research', text), 1, text);
+  for (const text of ['Карта постоянного клиента — 6-й кофе', 'Блогеры — обзоры', 'SMM — продвижение', 'Скидки по студенческому билету']) assert.equal(real('sales', text), 1, text);
+  assert.equal(real('sales', 'Привлечь студенческую энергию'), 0);
+});
+
+test('реальность: канал — по первой фразе; «вечерние часы» не мероприятие', () => {
+  assert.equal(realityCheck('sales', '1. Создать атмосферу, привлекая внимание к местному сообществу (например, мероприятия и встречи)').real, 0);
+  assert.equal(realityCheck('sales', '1. Продажа напитков в университете с акцентом на утренние часы и вечерние закрытие').real, 0);
+  assert.equal(realityCheck('sales', '1. Организация кофейных вечеров для студентов').real, 1);
+  assert.equal(realityCheck('sales', '1. Участие в университетских мероприятиях — организация киоска').real, 1);
 });
