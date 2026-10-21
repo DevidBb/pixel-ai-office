@@ -338,7 +338,10 @@ export default function App() {
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.runId) throw new Error(data.error || `HTTP ${response.status}`);
       createdRuns.current.add(data.runId);
-      updateTask(taskId, current => ({ ...current, runId: data.runId }));
+      // История с сервера могла успеть принести копию этой задачи — остаётся только своя карточка.
+      setTasks(current => current
+        .filter(task => task.id === taskId || task.runId !== data.runId)
+        .map(task => task.id === taskId ? { ...task, runId: data.runId } : task));
       await followRun(taskId, data.runId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Неизвестная ошибка.';
