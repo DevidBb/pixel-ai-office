@@ -358,10 +358,12 @@ test('нераспознанное «не» рядом с именем: сотр
 
 // Задача до 5000 символов разбирается синхронно: долгий разбор останавливает весь сервер. Разбор — в отдельном
 // процессе с внешним тайм-аутом: если медленное выражение вернётся, тест упадёт, а не повиснет.
-function parsesQuickly(goal, ms = 3000) {
+// Путь сервера: разбор нормализованной копии, план с исходным текстом, подсказки каждому сотруднику.
+function parsesQuickly(goal, ms = 1500) {
   const office = new URL('../server/office.mjs', import.meta.url).href;
-  const code = `import(${JSON.stringify(office)}).then(o => { const g = o.normalizeGoal(${JSON.stringify(goal)});` +
-    ' const r = o.routeByExplicit(g, 5) || o.routeByRules(g, 5) || o.fallbackRoute(g, 5); o.buildPlan(g, r, {}); o.wantsWholeTeam(g); })';
+  const code = `import(${JSON.stringify(office)}).then(o => { const raw = ${JSON.stringify(goal)}; const g = o.normalizeGoal(raw);` +
+    ' const r = o.routeByExplicit(g, 5) || o.routeByRules(g, 5) || o.fallbackRoute(g, 5); const plan = o.buildPlan(g, r, { text: raw });' +
+    ' for (const t of plan.tasks) o.agentMessages(o.AGENTS.find(a => a.id === t.agentId), t, plan); o.wantsWholeTeam(g); })';
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { timeout: ms });
   return !result.error && result.status === 0;
 }

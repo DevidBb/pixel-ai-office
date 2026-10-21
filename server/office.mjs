@@ -212,8 +212,9 @@ export function parseAssignments(goal) {
   context += goal.slice(cursor);
   context = context
     // Хвост из разделителей перед точкой или концом. Без вложенного повтора «(?:[\s;,]*[;,])*»: на «;;;…;о»
-    // он перебирал все разбиения серии (27 знаков — секунды, 40 — часы) и вешал сервер.
-    .replace(/\s*[:;,][\s;,]*(?=\.|$)/g, '')
+    // он перебирал все разбиения серии (27 знаков — секунды, 40 — часы) и вешал сервер. Совпадение начинается только
+    // с начала серии разделителей (или с двоеточия): иначе каждая позиция серии заново проверяла её хвост.
+    .replace(/(?:(?<![\s;,])\s*[:;,]|\s*:)[\s;,]*(?=\.|$)/g, '')
     .replace(/\s*[;,](?:\s*[;,])+\s*/g, '; ').replace(/\s+([.;,])/g, '$1').replace(/\s{2,}/g, ' ').trim();
   for (const agentId of excluded) uncertain.delete(agentId);
   return { assignments: Object.fromEntries(assignments), excluded: [...excluded], uncertain: [...uncertain], context };
@@ -323,7 +324,11 @@ export function uncertainNote(goal, agentIds) {
     : '';
 }
 
-export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxTokens = 220 } = {}) {
+/**
+ * План задачи. goal — текст для разбора (normalizeGoal), text — исходный текст пользователя: он уходит сотрудникам
+ * в задании и контексте как есть, с отступами, табуляцией и пустыми строками.
+ */
+export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxTokens = 220, text = goal } = {}) {
   const single = route.agentIds.length === 1;
   const short = isShortRequest(goal);
   const assignments = route.assignments || {};
@@ -333,20 +338,22 @@ export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxToke
     tasks: route.agentIds.map(agentId => {
       const agent = agentById(agentId);
       const assignment = assignments[agentId];
-      const objective = assignment
+      const objectiveFor = whole => assignment
         ? assignment
         : single
-          ? goal
-          : `Выполни часть цели, относящуюся к твоей роли (${agent.role}): ${goal}`;
+          ? whole
+          : `Выполни часть цели, относящуюся к твоей роли (${agent.role}): ${whole}`;
+      const objective = objectiveFor(text);
+      const parsed = objectiveFor(goal);
       return {
         id: `task-${agentId}`,
         agentId,
         title: assignment ? `${agent.name}: ${clip(assignment, 70)}` : single ? `${agent.role}: выполнить задачу` : `${agent.role}: своя часть задачи`,
         objective,
-        context: assignment ? context : goal,
+        context: assignment ? context : text,
         assigned: Boolean(assignment),
-        exactlyOne: asksForOne(objective),
-        maxTokens: short || isShortRequest(objective) ? Math.min(agentShortMaxTokens, agentMaxTokens) : agentMaxTokens
+        exactlyOne: asksForOne(parsed),
+        maxTokens: short || isShortRequest(parsed) ? Math.min(agentShortMaxTokens, agentMaxTokens) : agentMaxTokens
       };
     })
   };

@@ -131,7 +131,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
   }
 
   function validateGoal(body) {
-    const goal = normalizeGoal(body.goal || '');
+    const goal = String(body.goal || '').trim();
     if (!goal) return { error: 'Напиши цель или задачу для CEO.' };
     if (goal.length > 5000) return { error: 'Слишком длинная задача: максимум 5000 символов.' };
     if (!config.apiKey && !config.isLocalUrl) {
@@ -150,10 +150,12 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
     try {
       safeEmit('log', { agentId: 'ceo', message: 'CEO принял цель и выбирает исполнителей.' });
       safeEmit('agent-status', { agentId: 'ceo', status: 'thinking', task: 'Распределяет задачу' });
-      const route = await routeGoal(goal, signal);
+      // Разбор и маршрутизация — по нормализованной копии, сотрудникам и в историю — исходный текст.
+      const parsed = normalizeGoal(goal);
+      const route = await routeGoal(parsed, signal);
       if (cancelled()) return;
-      const plan = buildPlan(goal, route, config);
-      const doubtful = uncertainNote(goal, route.agentIds);
+      const plan = buildPlan(parsed, route, { ...config, text: goal });
+      const doubtful = uncertainNote(parsed, route.agentIds);
       if (doubtful) safeEmit('log', { agentId: 'ceo', message: doubtful.trim(), kind: 'warning' });
       diag(`[run ${runId}] маршрут`, { method: route.method, source: route.source, agents: route.agentIds, ms: Date.now() - runStarted });
       safeEmit('plan', {
