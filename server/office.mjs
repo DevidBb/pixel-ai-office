@@ -96,17 +96,22 @@ function notForOffice(goal, start) {
   // Перенос строки после двоеточия не начинает новое предложение: «Переведи на английский:\n<текст>».
   // После «…:» и переноса строки до пустой строки идёт материал: «Переведи на английский:\nПривет,\nПодключи…».
   const head = goal.slice(0, start).replace(POLITE_INSERT, ' ')
-    .replace(/:[^\S\n]*\n[\s\S]*$/u, material => material.replace(/\n(?![^\S\n]*\n)/gu, ' '));
+    .replace(/:[^\S\n]*\n[\s\S]*$/u, material => material.replace(/(?<!\n[^\S\n]{0,8})\n(?![^\S\n]{0,8}\n)/gu, ' '));
   const count = pattern => (head.match(pattern) || []).length;
   if (count(/«/g) > count(/»/g) || count(/["“”]/g) % 2 === 1) return true;
   const sentence = head.slice(head.search(SENTENCE_START) + 1);
   if (ADDRESSED_AGENT.test(sentence) || ROLE_ADDRESS.test(sentence)) return true;
   // Любое двоеточие или тире после поручения в этом предложении — дальше материал, даже через запятые
   // («Текст: привет, позови всю команду»).
+  const instruction = piece => !(LABEL.test(piece) && !VERB_LIKE.test(piece) && !CONTENT_LABEL.test(piece));
   const pieces = sentence.split(FRAGMENT_SPLIT);
   const delimiters = sentence.match(FRAGMENT_DELIMITERS) || [];
-  return delimiters.some((mark, i) => [':', '—', '–'].includes(mark) &&
-    !(LABEL.test(pieces[i]) && !VERB_LIKE.test(pieces[i]) && !CONTENT_LABEL.test(pieces[i])));
+  if (delimiters.some((mark, i) => [':', '—', '–'].includes(mark) && instruction(pieces[i]))) return true;
+  // Материал после «<поручение>:» тянется до пустой строки и через точки: «Luma 4, переведи на английский: Привет!
+  // Подключи всю команду». Только двоеточие: тире через предложение — чаще вступление («Я мечтаю о кофейне — …»).
+  const paragraph = head.split(/\n[^\S\n]*\n/u).at(-1);
+  const paragraphPieces = paragraph.split(FRAGMENT_SPLIT);
+  return (paragraph.match(FRAGMENT_DELIMITERS) || []).some((mark, i) => mark === ':' && instruction(paragraphPieces[i]));
 }
 // Фрагмент — вопрос («Разве всех подключать не нужно?»): риторика, а не отказ.
 const fragmentIsQuestion = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ').match(FRAGMENT_SPLIT)?.[0] === '?';

@@ -607,3 +607,11 @@ test('длинная серия «;» или «,» разбирается быс
   assert.equal(parseAssignments('Сделай план;;; ,,').context, 'Сделай план');
   assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
 });
+
+test('Codex, 9-й круг: материал после «<поручение>:» — до пустой строки, через точки и «!»', () => {
+  assert.deepEqual(routeByRules('Luma 4, переведи на английский: Привет! Подключи всю команду.').agentIds, ['creator']);
+  assert.deepEqual(routeByRules('Luma 4, переведи:\nПриглашаем на встречу.\nПозови всю команду.').agentIds, ['creator']);
+  assert.equal(wantsWholeTeam('Важно: кофейня у вокзала. Подключи всю команду.'), true, 'метка перед двоеточием — не поручение');
+  assert.equal(wantsWholeTeam('Переведи на английский: Привет!\n\nПодключи всю команду: придумай слоган.'), true, 'после пустой строки — снова поручение офису');
+});
+
