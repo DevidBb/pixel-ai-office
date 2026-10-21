@@ -71,6 +71,8 @@ export default function App() {
   const historyUntil = useRef(new Map<string, number>());
   // Последняя задача, за которой следит страница: уведомление об отчёте — только для неё.
   const latestTaskRef = useRef<string | null>(null);
+  // Задачи, запущенные на этой странице: их серверные копии из истории второй раз не восстанавливаем.
+  const createdRuns = useRef(new Set<string>());
   // Задача, о готовом отчёте которой CEO сейчас сообщает, и отчёты, раскрытые автоматически.
   const [reportReady, setReportReady] = useState<string | null>(null);
   const [openedReports, setOpenedReports] = useState<string[]>([]);
@@ -259,9 +261,13 @@ export default function App() {
         }
       } catch { restored = []; /* сервер недоступен — показываем то, что есть в браузере */ }
       if (token.cancelled) return;
-      const merged = mergeHistory(tasks, restored);
-      // Пока история грузилась, могли поставить новую задачу: история добавляется к текущему списку, а не к снимку.
-      setTasks(current => mergeHistory(current, restored));
+      // Пока история грузилась, могли поставить новую задачу: история добавляется к текущему списку, а не к снимку,
+      // а серверная копия этой новой задачи не нужна — она уже в списке под своим номером.
+      const fresh = restored.filter(task => !task.runId || !createdRuns.current.has(task.runId));
+      const merged = mergeHistory(tasks, fresh);
+      setTasks(current => mergeHistory(current, fresh));
+      // Страница уже следит за задачей, которую только что поставили, — другую не подхватываем.
+      if (activeTaskRef.current) return;
       const unfinished = merged.find(task => RUNNING_STATUSES.includes(task.status));
       if (!unfinished) return;
       if (unfinished.runId) {
@@ -331,6 +337,7 @@ export default function App() {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.runId) throw new Error(data.error || `HTTP ${response.status}`);
+      createdRuns.current.add(data.runId);
       updateTask(taskId, current => ({ ...current, runId: data.runId }));
       await followRun(taskId, data.runId);
     } catch (error) {
