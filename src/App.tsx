@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
-import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import { cueForEvent, historyBoundary } from './officeMoves';
+import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import './stage2.css';
 
 const initialAgents: Agent[] = [
@@ -65,7 +65,6 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState('ceo');
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const [apiModel, setApiModel] = useState('');
-  const [isRunning, setIsRunning] = useState(false);
   // Уже показанные на сцене события: при переподключении сервер присылает их повторно.
   const shownCues = useRef(new Set<string>());
   // Для задачи, к которой страница подключилась после перезагрузки: события до этого номера — история.
@@ -75,6 +74,7 @@ export default function App() {
   // Задача, о готовом отчёте которой CEO сейчас сообщает, и отчёты, раскрытые автоматически.
   const [reportReady, setReportReady] = useState<string | null>(null);
   const [openedReports, setOpenedReports] = useState<string[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
