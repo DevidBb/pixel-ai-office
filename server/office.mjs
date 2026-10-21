@@ -443,17 +443,20 @@ const REALITY_RULE = 'Называй только то, что уже сущес
 const CREATIVE_RULE = 'Пиши грамотно и просто.';
 // Название или слоган — творческое, только если это собственное поручение сотрудника с глаголом «придумай/напиши…»
 // или поручение с них начинается («Luma 3 — слоган»). «Изучи слоганы конкурентов» — анализ существующего.
-const NAMING_TASK = /(?<!\p{L})(?:(?:придумай|сочини|напиши|предложи|создай|разработай)(?:те)?\s+(?:\p{L}+\s+){0,2}(?:назван|слоган|нейминг)|назван\p{L}*\s+для|нейминг)|^\s*(?:\d+\s+)?(?:слоган|назван)/iu;
+const NAMING_TASK = /(?<!\p{L})(?:(?:придумай|сочини|напиши|предложи|создай|разработай)(?:те)?\s+(?:[\p{L}\d]+\s+){0,2}(?:назван|слоган|нейминг)|назван\p{L}*\s+для)|^\s*(?:\d+\s+)?(?:слоган|назван|нейминг)/iu;
 // Новизна — и в поручении, и в общем контексте задачи («Разрабатываем новые напитки…. Luma 3 — 3 напитка»).
 // «без необычных сочетаний», «не уникальные» — не просьба о новом. Отрицание — до трёх пробелов: без перебора серий.
 const NOVELTY = /(?<!(?:без|не)\s{1,3})(?<!\p{L})(?:необычн|оригинальн|уникальн|новинк|которых\s+нет|нов(?:ые|ых|ый|ую|ое|ой)\s+(?:напит|продукт|услуг|блюд|вкус))/iu;
 
-function realityRule(agent, task) {
+function realityRule(agent, task, plan) {
   if (agent.id === 'finance') return '';
   if (agent.id === 'creator') return CREATIVE_RULE;
   // В ролевом плане objective — вся цель: чужой «слоган» в ней не делает задание творческим.
   const own = task.assigned ? task.objective : '';
-  return NAMING_TASK.test(own) || NOVELTY.test(own) || NOVELTY.test(task.context || '') ? CREATIVE_RULE : REALITY_RULE;
+  // В общем контексте может оказаться вся цель с чужими поручениями: «Luma 3 — 3 необычных напитка» — не про Luma 2.
+  let shared = task.context || '';
+  for (const other of plan?.tasks || []) if (other !== task && other.objective) shared = shared.split(other.objective).join(' ');
+  return NAMING_TASK.test(own) || NOVELTY.test(own) || NOVELTY.test(shared) ? CREATIVE_RULE : REALITY_RULE;
 }
 
 // Подсказка намеренно короткая и без имён коллег: на CPU каждый токен подсказки стоит ~45 мс,
@@ -461,7 +464,7 @@ function realityRule(agent, task) {
 // Для адресного задания описание роли не передаётся: маленькая модель заполняет его как шаблон
 // («Предложение / Цена-гипотеза / Критерии» вместо трёх напитков, «затраты и маржа», когда просили выручку).
 export function agentMessages(agent, task, plan) {
-  const reality = realityRule(agent, task);
+  const reality = realityRule(agent, task, plan);
   const base = `Ты ${agent.name}, ${agent.role} в Pixel AI Office. Отвечай на русском, конкретно и честно. Не выдумывай ссылки, клиентов, контакты и продажи. ${reality && `${reality} `}Пиши только свой результат: не упоминай других сотрудников и не пиши за них.`;
   const system = task.assigned
     ? `${base} Выполняй ровно то, что сказано в задании: не добавляй разделы, цифры и расчёты, о которых не просили.`

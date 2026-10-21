@@ -80,11 +80,13 @@ const REALITY = {
     // Еда и посуда в названии («Шоколадный торт», «Чайная ложка») — не напиток, даже если в названии есть «шоколад» или «кофе».
     unrealName: words(['шаурм', 'бургер', 'пицц', 'торт(?:ы|а|ик)?(?!\\p{L})', 'кекс', 'пирог', 'печень', 'круассан', 'булоч', 'сэндвич', 'бутерброд',
       'салат', 'оливье', 'чизкейк', 'маффин', 'макарон', 'десерт', 'батончик', 'з[её]рн', 'брейк', 'ложк', 'машин', 'кофейник', 'чайник']),
-    // Алкоголь где угодно в пункте (и ирландский кофе) — не для кофейни у университета, если в пункте нет явной
-    // пометки «без алкоголя», «безалкогольный», «алкоголь не добавляем». Пометка — на весь пункт: «Глинтвейн без
-    // алкоголя» — безалкогольный, а «Кофе без сахара, ром» — с ромом.
-    unreal: words(['ирландск', 'глинтвейн', 'вин(?:о|а|у|ом|е)(?!\\p{L})', 'винн', 'пив', 'алкогол', 'коньяк', 'ликёр', 'ликер', 'ром(?:а|у|ом|е)?(?!\\p{L})', 'виски', 'водк', 'шампанск']),
-    nonAlcohol: /(?<!\p{L})(?:без\s+(?:\p{L}+\s+){0,4}?алкогол|безалкогольн|алкогол\p{L}*\s+(?:не|нет)(?!\p{L})|не\s+содерж\p{L}*\s+алкогол)/iu
+    // Алкоголь в пункте — не для кофейни у университета. Каждое упоминание проверяется отдельно: «без рома», «без
+    // коньяка», «без сахара и алкоголя», «алкоголь не добавляем» — отрицание (до трёх слов, без запятой: «Кофе без
+    // сахара, ром» — с ромом). Пометка «без алкоголя / безалкогольный» снимает только названия напитков
+    // («Глинтвейн без алкоголя»), но не ингредиенты: «Кофе с ромом — без алкоголя в сиропе» — с ромом.
+    alcoholDrink: /(?<!\p{L})(?:ирландск|глинтвейн|вин(?:о|а|у|ом|е)(?!\p{L})|винн|пив|шампанск)/giu,
+    alcoholIngredient: /(?<!\p{L})(?:алкогол|коньяк|ликёр|ликер|ром(?:а|у|ом|е)?(?!\p{L})|виски|водк)/giu,
+    nonAlcohol: /(?<!\p{L})(?:без\s+(?:[\p{L}-]+\s+(?:(?:и|или)\s+)?){0,3}алкогол|безалкогольн)/iu
   },
   sales: {
     // Первая фраза до тире или скобки: пояснение «(например, мероприятия…)» не делает каналом «Создать атмосферу».
@@ -106,15 +108,28 @@ function itemName(lines, scope) {
   return (scope === 'phrase' ? text.split(/\s+[—–-]\s+|\(/u) : text.split(/\s+[—–-]\s+|[:(,.]/u))[0].trim();
 }
 
+const NEGATED_BEFORE = /(?:^|[^\p{L}])(?:без|не)\s+(?:[\p{L}-]+\s+(?:(?:и|или)\s+)?){0,3}$/iu;
+const NEGATED_AFTER = /^\p{L}*\s+(?:не|нет)\s+(?:добавл|содерж|использ|клад|нали|подмеш)/iu;
+/** В пункте есть алкоголь, не снятый отрицанием рядом с ним; окно — 40 символов, без перебора длинных строк. */
+function alcoholic(rule, text) {
+  if (!rule.alcoholIngredient) return false;
+  const negated = match => NEGATED_BEFORE.test(text.slice(Math.max(0, match.index - 40), match.index)) ||
+    NEGATED_AFTER.test(text.slice(match.index, match.index + 40));
+  const ingredient = [...text.matchAll(rule.alcoholIngredient)].some(match => !negated(match));
+  const drink = !rule.nonAlcohol.test(text) && [...text.matchAll(rule.alcoholDrink)].some(match => !negated(match));
+  return ingredient || drink;
+}
+
 /** Сколько пунктов ответа называют существующее; null — для роли нет словаря (слоган, расчёт). */
 export function realityCheck(agentId, text) {
   const rule = REALITY[agentId];
   if (!rule) return null;
   const items = listItems(text).map(lines => ({ name: itemName(lines, rule.scope), text: lines.join(' ') }));
-  // Еда и посуда — по главной части названия: «Кофе из обжаренного зерна», «Молочный коктейль с печеньем» — напитки.
-  const head = name => name.split(/\s+(?:из|с|со|на|без|и)\s+/iu)[0];
-  const alcoholic = item => rule.unreal?.test(item.text) && !rule.nonAlcohol?.test(item.text);
-  const unreal = items.filter(item => !rule.real.test(item.name) || rule.unrealName?.test(head(item.name)) || alcoholic(item))
+  // Еда допускается только как добавка к названному напитку, после «из / с / со / без»: «Кофе из обжаренного зерна»,
+  // «Молочный коктейль с печеньем» — напитки; «Кофе и шаурма», «Напиток с кофейным кексом» — нет. «Напиток с чаем» — напиток.
+  const head = name => name.split(/\s+(?:из|с|со|без)\s+/iu)[0];
+  const food = name => rule.unrealName?.test(name) && (rule.unrealName.test(head(name)) || !rule.real.test(head(name)));
+  const unreal = items.filter(item => !rule.real.test(item.name) || food(item.name) || alcoholic(rule, item.text))
     .map(item => item.name || '—');
   return { real: items.length - unreal.length, total: items.length, unreal };
 }

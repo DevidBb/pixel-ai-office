@@ -323,6 +323,12 @@ test('realityCheck: пометка «без алкоголя» — на весь
   assert.equal(real('1. Молочный коктейль с печеньем'), 1);
   assert.equal(real('1. Шоколадный торт'), 0);
   assert.equal(real('1. Ирландский кофе'), 0);
+  assert.equal(real('1. Кофе без рома'), 1);
+  assert.equal(real('1. Чай без коньяка'), 1);
+  assert.equal(real('1. Кофе с ромом — алкоголь не выпариваем'), 0);
+  assert.equal(real('1. Кофе и шаурма'), 0);
+  assert.equal(real('1. Напиток с кофейным кексом'), 0);
+  assert.equal(real('1. Напиток на основе эспрессо'), 1);
   const started = performance.now();
   realityCheck('product', '1. Чай — ' + ' '.repeat(4990) + 'я');
   assert.ok(performance.now() - started < 500, `${Math.round(performance.now() - started)} мс`);
