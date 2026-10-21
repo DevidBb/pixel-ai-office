@@ -260,7 +260,8 @@ export default function App() {
       } catch { restored = []; /* сервер недоступен — показываем то, что есть в браузере */ }
       if (token.cancelled) return;
       const merged = mergeHistory(tasks, restored);
-      setTasks(merged);
+      // Пока история грузилась, могли поставить новую задачу: история добавляется к текущему списку, а не к снимку.
+      setTasks(current => mergeHistory(current, restored));
       const unfinished = merged.find(task => RUNNING_STATUSES.includes(task.status));
       if (!unfinished) return;
       if (unfinished.runId) {
