@@ -4,6 +4,7 @@ import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
 import { cueForEvent, historyBoundary } from './officeMoves';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
+import { buildReportMarkdown, reportFileName, taskStatusLabel } from './reportExport';
 import './stage2.css';
 
 const initialAgents: Agent[] = [
@@ -17,9 +18,6 @@ const initialAgents: Agent[] = [
 
 const agentStatusLabel: Record<Agent['status'], string> = {
   idle: 'Ожидает', working: 'Работает', thinking: 'Думает', done: 'Готово', error: 'Ошибка'
-};
-const taskStatusLabel: Record<TaskStatus, string> = {
-  planning: 'Планирует', working: 'Выполняется', review: 'Проверка CEO', done: 'Завершено', error: 'Ошибка'
 };
 const STORAGE_KEY = 'pixel-ai-office.tasks.stage2';
 
@@ -77,6 +75,9 @@ export default function App() {
   const [reportReady, setReportReady] = useState<string | null>(null);
   const [openedReports, setOpenedReports] = useState<string[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  // Итог экспорта у каждой карточки свой: «Скопировано» на 2 с или понятная ошибка буфера обмена.
+  const [exportNotes, setExportNotes] = useState<Record<string, { kind: 'copied' | 'error'; text: string }>>({});
+  const exportNoteTimers = useRef(new Map<string, number>());
 
   useEffect(() => {
     let cancelled = false;
@@ -301,6 +302,37 @@ export default function App() {
     promptRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
+  function showExportNote(taskId: string, note: { kind: 'copied' | 'error'; text: string }, ms: number) {
+    window.clearTimeout(exportNoteTimers.current.get(taskId));
+    setExportNotes(current => ({ ...current, [taskId]: note }));
+    exportNoteTimers.current.set(taskId, window.setTimeout(() => {
+      exportNoteTimers.current.delete(taskId);
+      setExportNotes(({ [taskId]: _gone, ...rest }) => rest);
+    }, ms));
+  }
+
+  async function copyReport(task: OfficeTask) {
+    try {
+      // Буфер обмена есть только в защищённом контексте (localhost или https) и с разрешения браузера.
+      if (!navigator.clipboard?.writeText) throw new Error('no clipboard');
+      await navigator.clipboard.writeText(buildReportMarkdown(task, initialAgents));
+      showExportNote(task.id, { kind: 'copied', text: 'Скопировано' }, 2000);
+    } catch {
+      showExportNote(task.id, { kind: 'error', text: 'Браузер не дал доступ к буферу обмена (нужен localhost или https и разрешение). Скачайте .md.' }, 8000);
+    }
+  }
+
+  function downloadReport(task: OfficeTask) {
+    const url = URL.createObjectURL(new Blob([buildReportMarkdown(task, initialAgents)], { type: 'text/markdown;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = reportFileName(task);
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function deleteTask(task: OfficeTask) {
     if (task.runId) {
       try { await fetch(`/api/runs/${task.runId}`, { method: 'DELETE' }); } catch { /* удалим хотя бы из браузера */ }
@@ -459,6 +491,9 @@ export default function App() {
                   {!RUNNING_STATUSES.includes(task.status) && <div className="task-actions">
                     <button type="button" onClick={() => repeatTask(task)} disabled={isRunning} title="Подставить текст задачи в поле, чтобы запустить заново">Повторить</button>
                     <button type="button" onClick={() => void deleteTask(task)} title="Удалить из истории в браузере и на сервере">Удалить</button>
+                    <button type="button" onClick={() => void copyReport(task)} title="Скопировать отчёт в Markdown: задача, план, результаты, итог">{exportNotes[task.id]?.kind === 'copied' ? 'Скопировано' : 'Копировать'}</button>
+                    <button type="button" onClick={() => downloadReport(task)} title="Скачать отчёт файлом .md">Скачать .md</button>
+                    {exportNotes[task.id]?.kind === 'error' && <span className="export-note" role="alert">{exportNotes[task.id].text}</span>}
                   </div>}
                   {task.planSummary && <div className="plan-summary"><strong>План CEO</strong><p>{task.planSummary}</p></div>}
                   {(task.subtasks || []).length > 0 && <div className="subtask-list"><h3>Назначенные подзадачи</h3>{task.subtasks!.map(subtask => {
