@@ -4,7 +4,7 @@ import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed, uncertainNote
+  assertSomeoneAllowed, uncertainNote, normalizeGoal
 } from './office.mjs';
 
 const DELTA_INTERVAL_MS = 300;
@@ -131,7 +131,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
   }
 
   function validateGoal(body) {
-    const goal = String(body.goal || '').trim();
+    const goal = normalizeGoal(body.goal || '');
     if (!goal) return { error: 'Напиши цель или задачу для CEO.' };
     if (goal.length > 5000) return { error: 'Слишком длинная задача: максимум 5000 символов.' };
     if (!config.apiKey && !config.isLocalUrl) {
