@@ -46,7 +46,9 @@ test('callModel: тайм-аут обрывает запрос и освобож
     await assert.rejects(callModel(messages, { timeoutMs: 150, label: 'timeout' }), /не ответила за/);
     assert.ok(Date.now() - startedAt < 2_000);
     assert.equal(limiter.active, 0);
-    await new Promise(resolve => setTimeout(resolve, 50));
+    // Заглушка узнаёт об обрыве соединения не сразу: под нагрузкой фиксированных 50 мс не хватало.
+    const deadline = Date.now() + 2_000;
+    while (stub.state.closedByClient < 1 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
     assert.equal(stub.state.closedByClient, 1, 'HTTP-запрос к модели должен быть оборван');
   } finally { stub.stop(); }
 });
