@@ -354,3 +354,16 @@ test('нераспознанное «не» рядом с именем: сотр
   assert.equal(uncertainNote('Не стесняйся, Luma 4 — слоган', ['creator']), '');
   assert.equal(uncertainNote(COFFEE_GOAL, Object.keys(COFFEE_ASSIGNMENTS)), '');
 });
+
+// Задача до 5000 символов разбирается синхронно: долгий разбор останавливает весь сервер.
+test('длинная серия «;» или «,» разбирается быстро (раньше 27 знаков — секунды, 40 — часы)', () => {
+  for (const goal of [';'.repeat(40) + 'о', ','.repeat(40) + 'о', 'Luma 4 — слоган' + ' ;,'.repeat(1600) + 'кофейня', ';'.repeat(4999) + 'о']) {
+    const started = performance.now();
+    routeByRules(goal);
+    parseAssignments(goal);
+    assert.ok(performance.now() - started < 1000, `${Math.round(performance.now() - started)} мс на ${JSON.stringify(goal.slice(0, 20))}…`);
+  }
+  // Хвост из разделителей по-прежнему убирается, как до исправления.
+  assert.equal(parseAssignments('Сделай план;;; ,,').context, 'Сделай план');
+  assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
+});
