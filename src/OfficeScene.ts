@@ -7,6 +7,9 @@ export class OfficeScene extends Phaser.Scene {
   private agentSprites = new Map<string, Phaser.GameObjects.Container>();
   private statusLabels = new Map<string, Phaser.GameObjects.Text>();
   private initialized = false;
+  private statuses = new Map<string, Agent['status']>();
+  private monitors = new Map<string, Phaser.GameObjects.Text>();
+  private motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   constructor() {
     super('OfficeScene');
@@ -17,7 +20,12 @@ export class OfficeScene extends Phaser.Scene {
     this.drawFloor();
     this.drawRoomDetails();
     data.agents.forEach(agent => this.drawDesk(agent));
-    this.scale.on('resize', () => this.drawRoomDetails());
+    // The virtual floor has a fixed size; resizing is handled by Phaser's scale manager.
+    // Redrawing on every resize leaked another graphics object each time.
+    this.events.once('shutdown', () => {
+      this.agentSprites.clear(); this.statusLabels.clear(); this.statuses.clear(); this.monitors.clear();
+      this.initialized = false;
+    });
     this.initialized = true;
     // Сцена могла загрузиться, когда задача уже идёт: сразу показать текущие статусы.
     data.agents.forEach(agent => this.updateAgent(agent));
@@ -96,6 +104,10 @@ export class OfficeScene extends Phaser.Scene {
     p.fillStyle(Phaser.Display.Color.HexStringToColor(agent.color).color, 1); p.fillRect(-11, 18, 22, 12);
     person.add(p);
     this.agentSprites.set(agent.id, person);
+    const monitor = this.add.text(x, y + 58, '· · ·', {
+      fontFamily: 'monospace', fontSize: '10px', color: '#93c5b0', backgroundColor: '#121b20'
+    }).setOrigin(0.5);
+    this.monitors.set(agent.id, monitor);
 
     const label = this.add.text(x, y - 69, `${agent.name} · ${this.statusText(agent.status)}`, {
       fontFamily: 'monospace', fontSize: '11px', color: '#f3f4ef',
@@ -115,11 +127,27 @@ export class OfficeScene extends Phaser.Scene {
     if (!this.initialized) return;
     const label = this.statusLabels.get(agent.id);
     if (label) label.setText(`${agent.name} · ${this.statusText(agent.status)}`);
+    const previousStatus = this.statuses.get(agent.id);
+    if (previousStatus === agent.status) return;
+    this.statuses.set(agent.id, agent.status);
+    const monitor = this.monitors.get(agent.id);
+    if (monitor) {
+      this.tweens.killTweensOf(monitor);
+      monitor.setAlpha(1).setText(({ idle: '· · ·', working: '>_ ▍', thinking: '•••', done: '✓ OK', error: '! ERR' })[agent.status]);
+      monitor.setColor(agent.status === 'error' ? '#ff9b89' : '#93e0b4');
+      if (!this.motionPreference.matches && (agent.status === 'working' || agent.status === 'thinking')) {
+        this.tweens.add({ targets: monitor, alpha: 0.4, duration: 650, yoyo: true, repeat: -1 });
+      }
+    }
     const sprite = this.agentSprites.get(agent.id);
     if (!sprite) return;
     this.tweens.killTweensOf(sprite);
-    if (agent.status === 'working' || agent.status === 'thinking') {
-      this.tweens.add({ targets: sprite, y: agent.y - 33, duration: 480, yoyo: true, repeat: -1 });
+    sprite.y = agent.y - 31;
+    sprite.angle = 0;
+    if (!this.motionPreference.matches && (agent.status === 'working' || agent.status === 'thinking')) {
+      this.tweens.add({ targets: sprite, y: agent.y - (agent.status === 'working' ? 34 : 36), angle: agent.status === 'working' ? 2 : -3, duration: agent.status === 'working' ? 360 : 900, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    } else if (!this.motionPreference.matches && agent.status === 'done') {
+      this.tweens.add({ targets: sprite, y: agent.y - 42, duration: 220, yoyo: true, ease: 'Sine.easeOut' });
     } else {
       sprite.y = agent.y - 31;
     }

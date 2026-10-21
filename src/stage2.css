@@ -141,3 +141,32 @@
 
 .scene-frame { position: relative; }
 .scene-placeholder { position: absolute; inset: 10px; display: grid; place-items: center; padding: 16px; text-align: center; border-radius: 4px; background: #c9c6ba; color: #4c4f4a; font: 12px 'DM Mono', monospace; }
+
+/* Live teamwork: status comes from execution events, not a simulated timer. */
+.work-settings { margin: 0 20px 18px; padding: 14px; border: 1px solid #c6d2c4; background: #edf1e9; border-radius: 12px; }
+.work-settings > strong { font-size: .85rem; }
+.work-settings-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+.work-settings label { display: grid; gap: 6px; font-size: .72rem; color: #46564a; }
+.work-settings select { width: 100%; min-width: 0; padding: 8px; border: 1px solid #bcc8b9; border-radius: 6px; background: #fffdf7; color: #293a32; font: inherit; }
+.work-settings button, .document-actions button { border: 1px solid #668675; padding: 9px 12px; border-radius: 7px; color: #234434; background: #f7fbf5; cursor: pointer; font: inherit; font-size: .78rem; }
+.work-settings button:disabled { opacity: .5; cursor: default; }
+.work-settings small { display: block; margin-top: 10px; line-height: 1.5; color: #526458; }
+.work-settings p { font-size: .75rem; line-height: 1.5; }
+.team-progress { margin: 16px 0; padding: 12px 14px; background: #edf1e9; border-radius: 8px; }
+.team-progress > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: .78rem; }
+.team-progress progress { display: block; width: 100%; height: 8px; margin-top: 10px; accent-color: #4d8c68; }
+.document-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 16px 0; }
+.document-actions small { color: #627066; font-size: .75rem; }
+.agent-row { transition: background-color .25s ease, border-color .25s ease, transform .2s ease; }
+.agent-row:hover { transform: translateX(2px); }
+.agent-working, .agent-thinking { background: #eaf0e6; }
+.agent-working .agent-avatar, .agent-thinking .agent-avatar { animation: office-breathe 1.8s ease-in-out infinite; }
+.agent-working .status-tag i, .subtask-indicator.working { animation: office-pulse 1.2s ease-in-out infinite; }
+.chat-line, .document-actions, .team-progress { animation: office-appear .3s ease-out; }
+@keyframes office-breathe { 50% { box-shadow: 0 0 0 5px #6b977222; transform: translateY(-2px); } }
+@keyframes office-pulse { 50% { opacity: .35; } }
+@keyframes office-appear { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 480px) { .work-settings-fields { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

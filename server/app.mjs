@@ -97,6 +97,8 @@ function formatStats(stats) {
 
 /** HTTP-сервер офиса. callModel(messages, opts) → { text, stats } передаётся снаружи, чтобы тесты могли подменить модель. */
 export function createApp({ config, callModel, limiter, runs = new RunStore() }) {
+  let activeExecutions = 0;
+
   async function routeByModel(goal, signal) {
     const { text } = await callModel(routerMessages(goal), {
       json: true, maxTokens: config.routerMaxTokens, timeoutMs: config.routerTimeoutMs, signal, label: 'ceo-router'
@@ -142,6 +144,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
 
   /** Выполнение задачи. Не знает, куда идут события: в SSE-ответ (/api/execute) или в журнал задачи (/api/runs). */
   async function executeRun(goal, { emit: send, signal, runId }) {
+    activeExecutions++;
     const runStarted = Date.now();
     const cancelled = () => signal.aborted;
     const safeEmit = (type, payload) => { if (!cancelled()) send(type, payload); };
@@ -308,6 +311,8 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         safeEmit('agent-status', { agentId: 'ceo', status: 'error', task: 'Задача остановлена' });
         safeEmit('error', { message });
       }
+    } finally {
+      activeExecutions--;
     }
   }
 
@@ -433,6 +438,25 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens,
         handoff: config.handoff, crossTalk: config.crossTalk
       });
+    }
+    // Runtime settings apply to future runs only; the model client shares this config and limiter.
+    if (req.method === 'POST' && req.url === '/api/settings') {
+      try {
+        const body = await readBody(req);
+        if (!Number.isInteger(body.concurrency) || body.concurrency < 1 || body.concurrency > 5 ||
+            !['parallel', 'handoff'].includes(body.mode)) {
+          return sendJson(res, 400, { error: 'Выбери от 1 до 5 одновременных запросов и режим parallel или handoff.' });
+        }
+        if (activeExecutions || limiter.active || limiter.waiting) {
+          return sendJson(res, 409, { error: 'Дождись завершения задач или останови их перед сменой режима.' });
+        }
+        config.concurrency = body.concurrency;
+        config.handoff = body.mode === 'handoff';
+        limiter.max = body.concurrency;
+        return sendJson(res, 200, { concurrency: config.concurrency, handoff: config.handoff });
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message || 'Не удалось изменить режим работы.' });
+      }
     }
     // Проверка модели вызывает модель (занимает очередь, у платного API стоит денег), поэтому только POST:
     // его с чужого сайта отсекает проверка Origin выше. GET здесь — только подсказка.

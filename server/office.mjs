@@ -597,9 +597,9 @@ function cautious(...statuses) {
 const DIGEST_LINE_CHARS = 60;
 const DIGEST_EXPLAIN_CHARS = 50;
 const DIGEST_SENTENCE_CHARS = 100;
-// Данные в строке: числа, условия и ограничения, сроки и время, валюта словами. Такая строка передаётся целиком:
+// Данные в строке: числа (и словами), единицы, условия и ограничения, сроки и время, валюта словами. Такая строка передаётся целиком:
 // список слов условий всегда неполон, а резать по частям — терять «с мая по сентябрь» или «до конца месяца».
-const DIGEST_DATA = /\d|(?<!\p{L})(?:если|при|в\s+случае|когда|только|лишь|кроме|без|до\s+конца|в\s+течение|максимум|минимум|в\s+зависимости|зависит|огранич\p{L}*|бесплатн\p{L}*|утр\p{L}*|дн[её]м|вечер\p{L}*|будн\p{L}*|выходн\p{L}*|январ\p{L}*|феврал\p{L}*|март\p{L}*|апрел\p{L}*|ма[йя]|июн\p{L}*|июл\p{L}*|август\p{L}*|сентябр\p{L}*|октябр\p{L}*|ноябр\p{L}*|декабр\p{L}*|евро|рубл\p{L}*|доллар\p{L}*|процент\p{L}*)(?!\p{L})/iu;
+const DIGEST_DATA = /\d|(?<!\p{L})(?:если|при|в\s+случае|когда|только|лишь|кроме|без|до\s+конца|в\s+течение|максимум|минимум|в\s+зависимости|зависит|огранич\p{L}*|бесплатн\p{L}*|утр\p{L}*|дн[её]м|вечер\p{L}*|будн\p{L}*|выходн\p{L}*|январ\p{L}*|феврал\p{L}*|март\p{L}*|апрел\p{L}*|ма[йя]|июн\p{L}*|июл\p{L}*|август\p{L}*|сентябр\p{L}*|октябр\p{L}*|ноябр\p{L}*|декабр\p{L}*|после|евро|рубл\p{L}*|доллар\p{L}*|процент\p{L}*|миллилитр\p{L}*|литр\p{L}*|грамм\p{L}*|килограмм\p{L}*|штук\p{L}*|один|одна|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|двадцать|тридцать|сорок|пятьдесят|сто|двести|триста|пятьсот|тысяч\p{L}*)(?!\p{L})/iu;
 // Ограничение отрицанием («кто не пьёт коровье молоко», «не суммируется с акциями»).
 const DIGEST_LIMIT = /(?<!\p{L})не\s+\p{L}/iu;
 const DIGEST_DASH = /\s[—–-]\s/u;
@@ -695,7 +695,7 @@ export function handoffDigest(text) {
     // Своя пометка и раздел («Факты:») сильнее общей оговорки, но осторожное слово в тексте сильнее пометки:
     // «Факт: возможно 30 гостей» — гипотеза.
     const inline = statusOf(content);
-    if (!labelled && next) nextUsed = true;
+    if (next) nextUsed = true;
     rows.push({
       item: content[0].toUpperCase() + content.slice(1),
       own: Boolean(labelled || section),
@@ -711,7 +711,8 @@ export function handoffDigest(text) {
 }
 
 // Своя часть источника по заголовку раздела. Маленькая модель пишет и чужие разделы («Клиенты» у продуктолога),
-// а лимит подсказки уходил на них: если раздел своей роли есть, коллеге передаётся только он (и другие свои разделы).
+// а лимит подсказки уходил на них: если раздел своей роли есть, коллеге передаётся он (с подразделами — до заголовка
+// другой роли) и пункты до первого заголовка с данными или статусом («Цены ниже — при закупке по 20 €/кг [гипотеза]»).
 // Без своих разделов (короткий ответ, другие заголовки) — сводка целиком.
 const OWN_SECTION = {
   research: /клиент|аудитор|сегмент/iu,
@@ -722,13 +723,17 @@ const OWN_SECTION = {
 };
 
 function ownSections(agentId, digest) {
-  const sections = [];
+  const roleOf = header => Object.keys(OWN_SECTION).find(id => OWN_SECTION[id].test(header));
+  const sections = [{ role: null, lines: [] }];
   for (const line of digest.split('\n')) {
-    if (!line.startsWith('- ') || !sections.length) sections.push([]);
-    sections.at(-1).push(line);
+    const role = line.startsWith('- ') ? undefined : roleOf(line);
+    if (role) sections.push({ role, lines: [] });
+    sections.at(-1).lines.push(line);
   }
-  const own = sections.filter(s => !s[0].startsWith('- ') && s.length > 1 && OWN_SECTION[agentId]?.test(s[0]));
-  return own.length ? own.flat().join('\n') : digest;
+  const own = sections.filter(s => s.role === agentId && s.lines.some(line => line.startsWith('- ')));
+  if (!own.length) return digest;
+  const lead = sections[0].lines.filter(line => line.startsWith('- ') && /\d|\[(?:гипотеза|оценка|факт)\]/u.test(line));
+  return [...lead, ...own.flatMap(s => s.lines)].join('\n');
 }
 
 export function compactHandoffs(outcomes, { perSource = HANDOFF_SOURCE_CHARS, total = HANDOFF_TOTAL_CHARS } = {}) {
@@ -805,7 +810,7 @@ const LEADING_ADDRESS = /^(?:luma|люма)\s*[1-6](?!\d)/iu;
 // «Не согласен, утром»); утверждение — из двух своих слов. Пустой хвост («Звучит логично», «Именно так?») — пересказ.
 function addsToQuote(reply, sources) {
   const own = ownPart(reply, sources);
-  const asks = /\?["»”')\]]*$/u.test(reply) && own.endsOwn;
+  const asks = /\?[?!.…]*["»”')\]]*$/u.test(reply) && own.endsOwn;
   return own.number || own.words.length >= (asks || own.objects ? 1 : 2);
 }
 

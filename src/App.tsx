@@ -4,6 +4,7 @@ import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import './stage2.css';
+import { buildDocumentation } from './documentation';
 
 const initialAgents: Agent[] = [
   { id: 'ceo', name: 'Luma 1', role: 'CEO · Руководитель', color: '#5b8fa8', status: 'idle', task: 'Готов принимать цели', x: 165, y: 250 },
@@ -63,6 +64,12 @@ export default function App() {
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const [apiModel, setApiModel] = useState('');
   const [isRunning, setIsRunning] = useState(false);
+  const [concurrency, setConcurrency] = useState(3);
+  const [workMode, setWorkMode] = useState('parallel');
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState('');
+  const [provider, setProvider] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -103,6 +110,9 @@ export default function App() {
           if (cancelled) return;
           setApiConfigured(Boolean(data.configured));
           setApiModel(String(data.model || ''));
+          setConcurrency(data.concurrency || 1);
+          setWorkMode(data.handoff === true || (data.handoff === 'auto' && data.concurrency === 1) ? 'handoff' : 'parallel');
+          setProvider(String(data.provider || ''));
         })
         .catch(() => {
           if (cancelled) return;
@@ -113,6 +123,33 @@ export default function App() {
     checkHealth();
     return () => { cancelled = true; if (retryTimer) window.clearTimeout(retryTimer); };
   }, []);
+
+  async function applyWorkSettings() {
+    setSettingsBusy(true);
+    setSettingsMessage('');
+    try {
+      const response = await fetch('/api/settings', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ concurrency, mode: workMode })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Не удалось сохранить режим');
+      setSettingsDirty(false);
+      setSettingsMessage(`Применено: до ${data.concurrency} запросов одновременно. Действует до перезапуска сервера.`);
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : 'Нет связи с сервером');
+    } finally { setSettingsBusy(false); }
+  }
+
+  function downloadDocumentation(task: OfficeTask) {
+    const blob = new Blob([buildDocumentation(task)], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `office-${task.id.replace(/[^a-zA-Z0-9_-]/g, '_')}.md`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 
   function updateTask(taskId: string, updater: (task: OfficeTask) => OfficeTask) {
     setTasks(current => current.map(task => task.id === taskId ? updater(task) : task));
@@ -148,6 +185,8 @@ export default function App() {
       updateAgent('ceo', agent => ({ ...agent, status: 'done', task: 'Итоговый отчёт готов' }));
       finishLocally(taskId);
     } else if (event.type === 'error') {
+      setAgents(current => current.map(agent => agent.id !== 'ceo' && (agent.status === 'working' || agent.status === 'thinking')
+        ? { ...agent, status: 'idle', task: 'Выполнение остановлено' } : agent));
       updateAgent('ceo', agent => ({ ...agent, status: 'error', task: 'Нужна проверка ошибки' }));
       finishLocally(taskId);
     }
@@ -262,7 +301,7 @@ export default function App() {
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const title = prompt.trim();
-    if (!title || isRunning) return;
+    if (!title || isRunning || settingsBusy || settingsDirty || apiConfigured !== true) return;
     const taskId = crypto.randomUUID();
     const task: OfficeTask = {
       id: taskId,
@@ -360,23 +399,39 @@ export default function App() {
             <section className="panel agents-panel">
               <div className="panel-header"><div><span className="panel-kicker">TEAM STATUS</span><h2>Команда</h2></div><span className="count-pill">{agents.length}</span></div>
               <div className="agent-list">
-                {agents.map(agent => <button key={agent.id} className={`agent-row ${selectedAgent === agent.id ? 'selected' : ''}`} onClick={() => setSelectedAgent(agent.id)}>
+                {agents.map(agent => <button key={agent.id} className={`agent-row agent-${agent.status} ${selectedAgent === agent.id ? 'selected' : ''}`} onClick={() => setSelectedAgent(agent.id)}>
                   <span className="agent-avatar" style={{ background: agent.color }}>{agent.name.split(' ')[1]}</span>
                   <span className="agent-copy"><strong>{agent.name}{agent.id === 'ceo' ? ' · CEO' : ''}</strong><small>{agent.role}</small><small className="agent-task">{agent.task}</small></span>
                   <span className={`status-tag ${agent.status}`}><i />{agentStatusLabel[agent.status]}</span>
                 </button>)}
               </div>
-              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, распределяет подзадачи, собирает результаты и проверяет итог.' : 'Получает от CEO отдельное задание и пишет только свою часть. Результаты коллег ему не передаются.'}</p></div>
+              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, распределяет подзадачи, собирает результаты и проверяет итог.' : 'Получает от CEO отдельное задание и пишет только свою часть. В режиме связанной работы получает готовые данные коллег; в параллельном работает над своей частью сразу.'}</p></div>
             </section>
 
             <section className="panel task-panel">
               <div className="panel-header"><div><span className="panel-kicker">TASK DISPATCH</span><h2>Поставить цель CEO</h2></div><span className="paper-icon">↗</span></div>
+              <div className="work-settings">
+                <strong>Как работает команда</strong>
+                <div className="work-settings-fields">
+                  <label>Режим<select aria-label="Режим работы команды" value={workMode} onChange={event => { setWorkMode(event.target.value); setSettingsDirty(true); setSettingsMessage('Нажми «Применить режим» перед запуском задачи.'); }} disabled={isRunning || settingsBusy}>
+                    <option value="parallel">Все начинают сразу</option>
+                    <option value="handoff">С передачей данных коллегам</option>
+                  </select></label>
+                  <label>Одновременно<select aria-label="Число одновременных запросов" value={concurrency} onChange={event => { setConcurrency(Number(event.target.value)); setSettingsDirty(true); setSettingsMessage('Нажми «Применить режим» перед запуском задачи.'); }} disabled={isRunning || settingsBusy}>
+                    {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n} {n === 1 ? 'запрос' : n === 5 ? 'запросов' : 'запроса'}</option>)}
+                  </select></label>
+                </div>
+                <button type="button" onClick={() => void applyWorkSettings()} disabled={isRunning || settingsBusy || !apiConfigured}>{settingsBusy ? 'Применяем…' : 'Применить режим'}</button>
+                <small>{workMode === 'parallel' ? 'Независимые части выполняются одновременно, CEO собирает общий итог.' : 'Сотрудник ждёт только тех коллег, чьи результаты нужны для его части.'}</small>
+                {provider === 'ollama' && <small>Локальная модель тоже должна поддерживать несколько одновременных запросов; число слотов само по себе не ускоряет CPU.</small>}
+                {settingsMessage && <p role="status">{settingsMessage}</p>}
+              </div>
               <form onSubmit={submitTask} className="task-form">
                 <div className="ceo-route"><span className="ceo-route-icon">C</span><span><strong>CEO · Luma 1</strong><small>Сам назначит специалистов и приоритеты</small></span></div>
                 <label htmlFor="task-prompt">КАКОЙ РЕЗУЛЬТАТ НУЖЕН?</label>
                 <textarea id="task-prompt" ref={promptRef} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Например: проверь спрос на услугу для малого бизнеса в Эстонии, подготовь предложение и план привлечения первого клиента…" rows={5} maxLength={5000} />
                 <div className="prompt-meta"><span>Можно адресовать задания: «Luma 4 — слоган»</span><span>{prompt.length}/5000</span></div>
-                <button className="dispatch-button" type="submit" disabled={!prompt.trim() || isRunning || apiConfigured === false}><span>{isRunning ? 'Команда выполняет задачу…' : 'Передать цель CEO'}</span><span>↗</span></button>
+                <button className="dispatch-button" type="submit" disabled={!prompt.trim() || isRunning || settingsBusy || settingsDirty || apiConfigured !== true}><span>{isRunning ? 'Команда выполняет задачу…' : 'Передать цель CEO'}</span><span>↗</span></button>
                 {isRunning && <button className="stop-button" type="button" onClick={stopTask}>Остановить выполнение</button>}
                 <p className="prototype-note"><span>ⓘ</span> Используются реальные вызовы модели через локальный API-сервер. Поиск в интернете, рассылка сообщений и оплата не выполняются автоматически.</p>
               </form>
@@ -389,6 +444,10 @@ export default function App() {
           {tasks.length === 0 ? <div className="empty-state"><span className="empty-symbol">⌁</span><strong>Офис ждёт первую цель</strong><p>CEO разобьёт её на отдельные подзадачи и передаст их специалистам.</p></div> :
             <div className="task-list">{tasks.map(task => {
               const ceo = agents.find(agent => agent.id === task.agentId);
+              const subtasks = task.subtasks || [];
+              const finished = subtasks.filter(item => item.status === 'done').length;
+              const working = RUNNING_STATUSES.includes(task.status) ? subtasks.filter(item => item.status === 'working').length : 0;
+              const failed = subtasks.filter(item => item.status === 'error').length;
               return <article className="task-item task-item-expanded" key={task.id}>
                 <span className={`task-state ${task.status}`} />
                 <div className="task-item-copy">
@@ -397,6 +456,10 @@ export default function App() {
                   {!RUNNING_STATUSES.includes(task.status) && <div className="task-actions">
                     <button type="button" onClick={() => repeatTask(task)} disabled={isRunning} title="Подставить текст задачи в поле, чтобы запустить заново">Повторить</button>
                     <button type="button" onClick={() => void deleteTask(task)} title="Удалить из истории в браузере и на сервере">Удалить</button>
+                  </div>}
+                  {subtasks.length > 0 && <div className="team-progress">
+                    <div><strong>{finished} из {subtasks.length} готово</strong><span>{working} работают · {subtasks.length - finished - working - failed} {RUNNING_STATUSES.includes(task.status) ? 'ожидают' : 'не завершены'}{failed ? ` · ${failed} с ошибкой` : ''}</span></div>
+                    <progress aria-label="Завершённые подзадачи" value={finished} max={subtasks.length} />
                   </div>}
                   {task.planSummary && <div className="plan-summary"><strong>План CEO</strong><p>{task.planSummary}</p></div>}
                   {(task.subtasks || []).length > 0 && <div className="subtask-list"><h3>Назначенные подзадачи</h3>{task.subtasks!.map(subtask => {
@@ -421,7 +484,8 @@ export default function App() {
                     const to = agents.find(item => item.id === line.to);
                     return <div className="chat-line" key={line.id}><time>{line.time}</time><strong>{agent?.name || line.agentId}{to ? ` → ${to.name}` : ''}</strong><span>{line.text}</span></div>;
                   })}</div>}
-                  {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
+                  {task.planSummary && <div className="document-actions"><button type="button" onClick={() => downloadDocumentation(task)}>{task.result ? '↓ Скачать документацию CEO (.md)' : '↓ Скачать текущее ТЗ (.md)'}</button><small>Цель, задания, результаты и итог в одном документе</small></div>}
+                  {task.result && <details className="final-result" open><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
                   {(task.logs || []).length > 0 && <details className="collaboration-log"><summary>Журнал действий ({task.logs!.length})</summary><div className="log-entries">{task.logs!.map(log => {
                     const agent = agents.find(item => item.id === log.agentId);
                     return <div className={`log-entry ${log.kind || 'info'}`} key={log.id}><time>{log.time}</time><strong>{agent?.name || log.agentId}</strong><span>{log.message}</span></div>;
