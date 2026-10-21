@@ -312,3 +312,18 @@ test('реальность: канал — по первой фразе; «ве�
   assert.equal(realityCheck('sales', '1. Организация кофейных вечеров для студентов').real, 1);
   assert.equal(realityCheck('sales', '1. Участие в университетских мероприятиях — организация киоска').real, 1);
 });
+
+test('realityCheck: пометка «без алкоголя» — на весь пункт, еда — только в главной части названия, без медленного перебора', () => {
+  const real = text => realityCheck('product', text).real;
+  assert.equal(real('1. Глинтвейн без алкоголя'), 1);
+  assert.equal(real('1. Кофе — алкоголь не добавляем'), 1);
+  assert.equal(real('1. Капучино без сахара и алкоголя'), 1);
+  assert.equal(real('1. Кофе без сахара, ром'), 0, '«без» относится к сахару, ром остаётся');
+  assert.equal(real('1. Кофе из обжаренного зерна'), 1);
+  assert.equal(real('1. Молочный коктейль с печеньем'), 1);
+  assert.equal(real('1. Шоколадный торт'), 0);
+  assert.equal(real('1. Ирландский кофе'), 0);
+  const started = performance.now();
+  realityCheck('product', '1. Чай — ' + ' '.repeat(4990) + 'я');
+  assert.ok(performance.now() - started < 500, `${Math.round(performance.now() - started)} мс`);
+});

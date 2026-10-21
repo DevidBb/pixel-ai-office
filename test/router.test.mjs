@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { routeByRules, routeByExplicit, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -353,4 +353,23 @@ test('нераспознанное «не» рядом с именем: сотр
   assert.equal(uncertainNote('Не подключай, пожалуйста, Luma 2; Luma 4 — слоган', ['creator']), '');
   assert.equal(uncertainNote('Не стесняйся, Luma 4 — слоган', ['creator']), '');
   assert.equal(uncertainNote(COFFEE_GOAL, Object.keys(COFFEE_ASSIGNMENTS)), '');
+});
+
+test('правило реальности: творческое — по своему поручению, новизна — и по контексту, отрицание и анализ — не творчество', () => {
+  const rule = goal => {
+    const route = routeByExplicit(goal) || routeByRules(goal) || fallbackRoute(goal);
+    const plan = buildPlan(goal, route);
+    return Object.fromEntries(plan.tasks.map(task => {
+      const system = agentMessages(AGENTS.find(a => a.id === task.agentId), task, plan)[0].content;
+      return [task.agentId, system.includes('Называй только то') ? 'реальн' : system.includes('Пиши грамотно') ? 'творч' : '—'];
+    }));
+  };
+  assert.deepEqual(rule('Luma 3 — перечисли 3 существующих напитка без необычных сочетаний'), { product: 'реальн' });
+  assert.deepEqual(rule('Luma 2 — изучи слоганы конкурентов'), { research: 'реальн' });
+  assert.deepEqual(rule('Разрабатываем новые напитки, которых нет у конкурентов. Luma 3 — предложи 3 напитка'), { product: 'творч' });
+  assert.deepEqual(rule('Luma 3 — придумай название для нового напитка'), { product: 'творч' });
+  const role = rule('Запусти кофейню: исследуй рынок, предложи напитки и придумай слоган');
+  assert.equal(role.creator, 'творч');
+  for (const id of ['research', 'product', 'sales']) if (role[id]) assert.equal(role[id], 'реальн', `${id}: чужой «слоган» в общей цели`);
+  assert.deepEqual(rule(COFFEE_GOAL), { research: 'реальн', product: 'реальн', creator: 'творч', sales: 'реальн', finance: '—' });
 });
