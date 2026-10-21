@@ -372,4 +372,15 @@ test('правило реальности: творческое — по сво�
   assert.equal(role.creator, 'творч');
   for (const id of ['research', 'product', 'sales']) if (role[id]) assert.equal(role[id], 'реальн', `${id}: чужой «слоган» в общей цели`);
   assert.deepEqual(rule(COFFEE_GOAL), { research: 'реальн', product: 'реальн', creator: 'творч', sales: 'реальн', finance: '—' });
+// Задача до 5000 символов разбирается синхронно: долгий разбор останавливает весь сервер.
+test('длинная серия «;» или «,» разбирается быстро (раньше 27 знаков — секунды, 40 — часы)', () => {
+  for (const goal of [';'.repeat(40) + 'о', ','.repeat(40) + 'о', 'Luma 4 — слоган' + ' ;,'.repeat(1600) + 'кофейня', ';'.repeat(4999) + 'о']) {
+    const started = performance.now();
+    routeByRules(goal);
+    parseAssignments(goal);
+    assert.ok(performance.now() - started < 1000, `${Math.round(performance.now() - started)} мс на ${JSON.stringify(goal.slice(0, 20))}…`);
+  }
+  // Хвост из разделителей по-прежнему убирается, как до исправления.
+  assert.equal(parseAssignments('Сделай план;;; ,,').context, 'Сделай план');
+  assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
 });
