@@ -45,6 +45,15 @@ export function cueForEvent(event: RunEvent, { historyUntil = 0, seen, key }: { 
   return cue;
 }
 
+/**
+ * Граница истории для задачи, к которой страница подключается при открытии (по строке из GET /api/runs).
+ * У идущей задачи история — события до lastSeq; у завершённой — всё; задачи нет в списке — тоже всё.
+ */
+export function historyBoundary(run?: { status?: string; lastSeq?: number }) {
+  if (!run || run.status !== 'running') return Number.MAX_SAFE_INTEGER;
+  return Number(run.lastSeq) || 0;
+}
+
 function rawCue(event: RunEvent): SceneCue | null {
   switch (event.type) {
     case 'plan': {

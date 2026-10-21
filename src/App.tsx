@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
-import { cueForEvent } from './officeMoves';
+import { cueForEvent, historyBoundary } from './officeMoves';
 import './stage2.css';
 
 const initialAgents: Agent[] = [
@@ -147,8 +147,8 @@ export default function App() {
       key: event.seq ? `${taskId}:${event.seq}` : undefined
     });
     if (cue) {
-      // Во вкладке в фоне сцена стоит на паузе: пробежки не копятся до возвращения.
-      const played = document.hidden ? Promise.resolve() : sceneRef.current?.playCue(cue) ?? Promise.resolve();
+      // Во вкладке в фоне сцена стоит на паузе: пробежки не копятся до возвращения (quiet).
+      const played = sceneRef.current?.playCue(cue, { quiet: document.hidden }) ?? Promise.resolve();
       if (cue.kind === 'report') {
         void Promise.race([played, sleep(REPORT_NOTICE_FALLBACK_MS)]).then(() => {
           // Пока CEO объявлял отчёт, могла начаться (и даже закончиться) новая задача — тогда уведомление о старой не нужно.
@@ -247,11 +247,11 @@ export default function App() {
     const token = { cancelled: false };
     void (async () => {
       let restored: OfficeTask[] = [];
-      // Сколько событий у каждой задачи уже было на сервере в момент открытия страницы.
-      let eventCounts: Map<string, number> | null = null;
+      // Задачи на сервере в момент открытия страницы: по ним видно, какие события — уже история.
+      let serverRuns: Array<{ id: string; status?: string; lastSeq?: number }> | null = null;
       try {
-        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string; events?: number }> };
-        eventCounts = new Map(runs.map(run => [run.id, Number(run.events) || 0]));
+        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string; status?: string; lastSeq?: number }> };
+        serverRuns = runs;
         const known = new Set(tasks.map(task => task.runId).filter(Boolean));
         for (const { id } of runs.filter(run => !known.has(run.id))) {
           const response = await fetch(`/api/runs/${id}`);
@@ -266,7 +266,7 @@ export default function App() {
       if (unfinished.runId) {
         // Уже случившееся не проигрываем на сцене заново. Если список задач не загрузился, граница
         // неизвестна — тогда пробежек для этой задачи нет вовсе, следующие задачи покажутся как обычно.
-        historyUntil.current.set(unfinished.id, eventCounts?.get(unfinished.runId) ?? Number.MAX_SAFE_INTEGER);
+        historyUntil.current.set(unfinished.id, historyBoundary(serverRuns?.find(run => run.id === unfinished.runId)));
         void followRun(unfinished.id, unfinished.runId, token);
       } else {
         // Задача из старой версии (до /api/runs) жила в соединении и прервалась вместе со страницей.

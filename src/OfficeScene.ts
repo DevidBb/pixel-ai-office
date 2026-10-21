@@ -177,9 +177,20 @@ export class OfficeScene extends Phaser.Scene {
     this.animateFigure(person);
   }
 
-  /** Показывает пробежку к CEO по событию задачи. Promise выполняется, когда CEO объявил итоговый отчёт. */
-  playCue(cue: SceneCue): Promise<void> {
+  /**
+   * Показывает пробежку к CEO по событию задачи. Promise выполняется, когда CEO объявил итоговый отчёт.
+   * quiet — вкладка в фоне: без пробежек, но новая задача всё равно начинается с чистой сцены, а стопка листов растёт.
+   */
+  playCue(cue: SceneCue, { quiet = false }: { quiet?: boolean } = {}): Promise<void> {
     if (!this.initialized) return Promise.resolve();
+    if (quiet) {
+      if (cue.kind === 'briefing') this.resetVisits();
+      if (cue.kind === 'deliver' && !cue.failed) {
+        this.inboxCount++;
+        this.drawInbox();
+      }
+      return Promise.resolve();
+    }
     switch (cue.kind) {
       case 'briefing': this.briefing(cue.agentIds); return Promise.resolve();
       case 'deliver': this.deliver(cue.agentId, cue.failed); return Promise.resolve();

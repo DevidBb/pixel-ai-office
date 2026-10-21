@@ -5,7 +5,7 @@ import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import { RunStore } from '../server/runs.mjs';
 // Модуль интерфейса на TypeScript: Node 24 запускает его напрямую (снятие типов).
-import { CEO_SPOTS, CORRIDOR_Y, PERSON_LIFT, cueForEvent, pathToCeo, segmentDurations } from '../src/officeMoves.ts';
+import { CEO_SPOTS, CORRIDOR_Y, PERSON_LIFT, cueForEvent, historyBoundary, pathToCeo, segmentDurations } from '../src/officeMoves.ts';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
 // Столы как в src/App.tsx (initialAgents): центр стола, фигурка стоит на PERSON_LIFT выше.
@@ -48,6 +48,15 @@ test('cueForEvent: история (номер до границы) не запу
   // Событие без пробежки не занимает ключ.
   cueForEvent({ type: 'log', seq: 7 }, { seen, key: 'task:7' });
   assert.equal(seen.has('task:7'), false);
+});
+
+test('historyBoundary: у идущей задачи — номер последнего события, у завершённой или неизвестной — всё', () => {
+  assert.equal(historyBoundary({ status: 'running', lastSeq: 16 }), 16);
+  assert.equal(historyBoundary({ status: 'running' }), 0);
+  for (const status of ['done', 'error', 'cancelled', 'interrupted']) {
+    assert.equal(historyBoundary({ status, lastSeq: 16 }), Number.MAX_SAFE_INTEGER, status);
+  }
+  assert.equal(historyBoundary(undefined), Number.MAX_SAFE_INTEGER, 'список задач не загрузился');
 });
 
 // Прямоугольник стола (столешница и монитор) и фигурки (голова и туловище) — как в OfficeScene.
@@ -161,7 +170,7 @@ test('перезагрузка посреди задачи: случившеес
     midRun: async (base, runId, live) => {
       while (!live.events.some(e => e.type === 'agent-result')) await new Promise(r => setTimeout(r, 5));
       const { runs } = await (await fetch(`${base}/api/runs`)).json();
-      const historyUntil = runs.find(r => r.id === runId).events;
+      const historyUntil = historyBoundary(runs.find(r => r.id === runId));
       return { historyUntil, events: await readEvents(`${base}/api/runs/${runId}/events?after=0`) };
     }
   });

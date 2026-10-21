@@ -60,11 +60,13 @@ export class RunStore {
     return [...this.runs.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
-      .map(({ id, goal, status, createdAt, updatedAt, events }) => ({ id, goal, status, createdAt, updatedAt, events: events.length }));
+      // lastSeq — номер последнего события: после перезапуска сервера черновики не хранятся, и событий меньше этого номера.
+      .map(({ id, goal, status, createdAt, updatedAt, events }) => ({ id, goal, status, createdAt, updatedAt, events: events.length, lastSeq: events.at(-1)?.seq ?? 0 }));
   }
 
   push(run, type, payload = {}) {
-    const event = { seq: run.events.length + 1, at: Date.now(), type, ...payload };
+    // Не по числу событий: после перезапуска черновики выброшены, а номера остальных сохранены.
+    const event = { seq: (run.events.at(-1)?.seq ?? 0) + 1, at: Date.now(), type, ...payload };
     run.events.push(event);
     run.updatedAt = new Date(event.at).toISOString();
     for (const subscriber of run.subscribers) subscriber(event);
