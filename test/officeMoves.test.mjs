@@ -5,7 +5,7 @@ import { createApp } from '../server/app.mjs';
 import { Limiter } from '../server/llm.mjs';
 import { RunStore } from '../server/runs.mjs';
 // Модуль интерфейса на TypeScript: Node 24 запускает его напрямую (снятие типов).
-import { CEO_SPOTS, CORRIDOR_Y, LIVE_WINDOW_MS, PERSON_LIFT, cueForEvent, isLiveEvent, pathToCeo, segmentDurations } from '../src/officeMoves.ts';
+import { CEO_SPOTS, CORRIDOR_Y, PERSON_LIFT, cueForEvent, pathToCeo, segmentDurations } from '../src/officeMoves.ts';
 import { COFFEE_GOAL } from './fixtures.mjs';
 
 // Столы как в src/App.tsx (initialAgents): центр стола, фигурка стоит на PERSON_LIFT выше.
@@ -20,34 +20,33 @@ const DESKS = {
 const home = id => ({ x: DESKS[id].x, y: DESKS[id].y - PERSON_LIFT });
 
 test('cueForEvent: план — бегут за заданием, результат и ошибка — относят CEO, final — отчёт', () => {
-  const now = 1_000_000;
-  const plan = { type: 'plan', at: now, subtasks: [{ agentId: 'research' }, { agentId: 'sales' }, { agentId: 'research' }] };
-  assert.deepEqual(cueForEvent(plan, { now }), { kind: 'briefing', agentIds: ['research', 'sales'] });
-  assert.deepEqual(cueForEvent({ type: 'agent-result', at: now, agentId: 'sales' }, { now }), { kind: 'deliver', agentId: 'sales', failed: false });
-  assert.deepEqual(cueForEvent({ type: 'agent-error', at: now, agentId: 'finance' }, { now }), { kind: 'deliver', agentId: 'finance', failed: true });
-  assert.deepEqual(cueForEvent({ type: 'final', at: now, completedAgents: ['research', 'sales'] }, { now }), { kind: 'report', agentIds: ['research', 'sales'] });
+  const plan = { type: 'plan', seq: 3, subtasks: [{ agentId: 'research' }, { agentId: 'sales' }, { agentId: 'research' }] };
+  assert.deepEqual(cueForEvent(plan), { kind: 'briefing', agentIds: ['research', 'sales'] });
+  assert.deepEqual(cueForEvent({ type: 'agent-result', agentId: 'sales' }), { kind: 'deliver', agentId: 'sales', failed: false });
+  assert.deepEqual(cueForEvent({ type: 'agent-error', agentId: 'finance' }), { kind: 'deliver', agentId: 'finance', failed: true });
+  assert.deepEqual(cueForEvent({ type: 'final', completedAgents: ['research', 'sales'] }), { kind: 'report', agentIds: ['research', 'sales'] });
   for (const type of ['log', 'agent-status', 'agent-start', 'agent-delta', 'review-start', 'done', 'error']) {
-    assert.equal(cueForEvent({ type, at: now, agentId: 'research' }, { now }), null, type);
+    assert.equal(cueForEvent({ type, agentId: 'research' }), null, type);
   }
   // CEO сам к себе не бегает.
-  assert.equal(cueForEvent({ type: 'agent-result', at: now, agentId: 'ceo' }, { now }), null);
-  assert.equal(cueForEvent({ type: 'plan', at: now, subtasks: [] }, { now }), null);
+  assert.equal(cueForEvent({ type: 'agent-result', agentId: 'ceo' }), null);
+  assert.equal(cueForEvent({ type: 'plan', subtasks: [] }), null);
 });
 
-test('cueForEvent: история после перезагрузки не запускает пробежки, повтор события — тоже', () => {
-  const now = 2_000_000;
-  const old = { type: 'agent-result', at: now - LIVE_WINDOW_MS - 1, agentId: 'sales', seq: 5 };
-  assert.equal(isLiveEvent(old, now), false);
-  assert.equal(cueForEvent(old, { now }), null);
-  // Без времени события приходят только из /api/execute, где всё живое.
-  assert.equal(isLiveEvent({ type: 'plan' }, now), true);
+test('cueForEvent: история (номер до границы) не запускает пробежки, повтор события — тоже', () => {
+  const event = { type: 'agent-result', agentId: 'sales', seq: 5, at: Date.now() };
+  assert.equal(cueForEvent(event, { historyUntil: 5 }), null, 'событие было на сервере до открытия страницы');
+  assert.ok(cueForEvent({ ...event, seq: 6 }, { historyUntil: 5 }));
+  // Часы не участвуют: давнее время, расхождение часов браузера и сервера не важны — важен номер.
+  assert.ok(cueForEvent({ ...event, seq: 6, at: 0 }, { historyUntil: 5 }));
+  // Без номера события приходят только из прежнего /api/execute, где всё живое.
+  assert.ok(cueForEvent({ type: 'agent-result', agentId: 'sales' }, { historyUntil: 100 }));
 
   const seen = new Set();
-  const fresh = { type: 'agent-result', at: now - 1000, agentId: 'sales', seq: 6 };
-  assert.ok(cueForEvent(fresh, { now, seen, key: 'task:6' }));
-  assert.equal(cueForEvent(fresh, { now, seen, key: 'task:6' }), null, 'переподключение прислало то же событие');
+  assert.ok(cueForEvent({ ...event, seq: 6 }, { seen, key: 'task:6' }));
+  assert.equal(cueForEvent({ ...event, seq: 6 }, { seen, key: 'task:6' }), null, 'переподключение прислало то же событие');
   // Событие без пробежки не занимает ключ.
-  cueForEvent({ type: 'log', at: now, seq: 7 }, { now, seen, key: 'task:7' });
+  cueForEvent({ type: 'log', seq: 7 }, { seen, key: 'task:7' });
   assert.equal(seen.has('task:7'), false);
 });
 
@@ -93,7 +92,7 @@ test('segmentDurations: время отрезка пропорционально
 });
 
 // Настоящий журнал задачи: сервер с мок-моделью; `fail` — сотрудник, у которого модель падает.
-async function serverRun(goal, { fail } = {}) {
+async function serverRun(goal, { fail, delayMs = 0, midRun } = {}) {
   const config = readConfig({ OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1', OPENAI_MODEL: 'mock' });
   const limiter = new Limiter(1);
   async function callModel(messages, opts) {
@@ -101,6 +100,7 @@ async function serverRun(goal, { fail } = {}) {
     try {
       opts.onStart?.();
       if (fail && opts.label.endsWith(`/${fail}`)) throw new Error('модель недоступна');
+      if (delayMs) await new Promise(r => setTimeout(r, delayMs));
       return { text: `ОТВЕТ ${opts.label.split('/')[1]}`, stats: { outputTokens: 2 } };
     } finally { limiter.release(); }
   }
@@ -111,19 +111,38 @@ async function serverRun(goal, { fail } = {}) {
   try {
     const { runId } = await (await fetch(`${base}/api/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ goal }) })).json();
     const run = runs.get(runId);
+    const extra = midRun ? await midRun(base, runId, run) : undefined;
     while (run.status === 'running') await new Promise(r => setTimeout(r, 5));
-    return await (await fetch(`${base}/api/runs/${runId}`)).json();
+    return { ...(await (await fetch(`${base}/api/runs/${runId}`)).json()), extra };
   } finally { server.closeAllConnections(); server.close(); }
 }
 
-const liveCues = run => {
-  const seen = new Set();
-  return run.events.map(event => cueForEvent(event, { now: event.at, seen, key: `${run.id}:${event.seq}` })).filter(Boolean);
-};
+const liveCues = (events, historyUntil = 0, seen = new Set()) =>
+  events.map(event => cueForEvent(event, { historyUntil, seen, key: `t:${event.seq}` })).filter(Boolean);
+
+// Поток событий задачи (SSE) с самого начала, как его читает страница; до завершения задачи.
+async function readEvents(url) {
+  const response = await fetch(url);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const events = [];
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    let at;
+    while ((at = buffer.indexOf('\n\n')) >= 0) {
+      const data = buffer.slice(0, at).split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+      buffer = buffer.slice(at + 2);
+      if (data) events.push(JSON.parse(data));
+    }
+    if (done) return events;
+  }
+}
 
 test('задача кофейни: все пятеро бегут за заданием, относят результат, собираются на отчёт', async () => {
   const run = await serverRun(COFFEE_GOAL);
-  const cues = liveCues(run);
+  const cues = liveCues(run.events);
   const team = ['research', 'product', 'creator', 'sales', 'finance'];
   assert.deepEqual(cues[0], { kind: 'briefing', agentIds: team });
   const delivered = cues.filter(cue => cue.kind === 'deliver');
@@ -131,14 +150,37 @@ test('задача кофейни: все пятеро бегут за зада�
   assert.ok(delivered.every(cue => !cue.failed));
   assert.equal(cues.at(-1).kind, 'report');
   assert.deepEqual([...cues.at(-1).agentIds].sort(), [...team].sort());
-  // При повторе того же журнала позже (перезагрузка страницы) пробежек нет.
-  const later = run.events.at(-1).at + LIVE_WINDOW_MS + 1;
-  assert.equal(run.events.map(event => cueForEvent(event, { now: later })).filter(Boolean).length, 0);
+  // Повтор всего журнала после перезагрузки (граница = все события) пробежек не даёт.
+  assert.equal(liveCues(run.events, run.events.length).length, 0);
+});
+
+test('перезагрузка посреди задачи: случившееся не повторяется, дальнейшее показывается', async () => {
+  // Как страница при открытии: число событий из GET /api/runs, затем поток с начала (after=0).
+  const run = await serverRun(COFFEE_GOAL, {
+    delayMs: 40,
+    midRun: async (base, runId, live) => {
+      while (!live.events.some(e => e.type === 'agent-result')) await new Promise(r => setTimeout(r, 5));
+      const { runs } = await (await fetch(`${base}/api/runs`)).json();
+      const historyUntil = runs.find(r => r.id === runId).events;
+      return { historyUntil, events: await readEvents(`${base}/api/runs/${runId}/events?after=0`) };
+    }
+  });
+  const { historyUntil, events } = run.extra;
+  assert.ok(historyUntil > 0 && historyUntil < events.length, 'страница открылась посреди задачи');
+  const cues = liveCues(events, historyUntil);
+  const shownBefore = liveCues(events.filter(e => e.seq <= historyUntil));
+  assert.ok(shownBefore.some(cue => cue.kind === 'briefing'), 'распределение заданий было до перезагрузки');
+  assert.ok(!cues.some(cue => cue.kind === 'briefing'), 'и после перезагрузки не повторяется');
+  const deliveredBefore = shownBefore.filter(cue => cue.kind === 'deliver').map(cue => cue.agentId);
+  assert.ok(deliveredBefore.length >= 1);
+  const deliveredAfter = cues.filter(cue => cue.kind === 'deliver').map(cue => cue.agentId);
+  assert.deepEqual([...deliveredBefore, ...deliveredAfter].sort(), ['creator', 'finance', 'product', 'research', 'sales']);
+  assert.equal(cues.at(-1).kind, 'report', 'итоговый отчёт после перезагрузки показывается');
 });
 
 test('сотрудник с ошибкой сообщает CEO о неудаче и не зовётся на отчёт', async () => {
   const run = await serverRun(COFFEE_GOAL, { fail: 'finance' });
-  const cues = liveCues(run);
+  const cues = liveCues(run.events);
   assert.deepEqual(cues.find(cue => cue.kind === 'deliver' && cue.agentId === 'finance'), { kind: 'deliver', agentId: 'finance', failed: true });
   const report = cues.at(-1);
   assert.equal(report.kind, 'report');

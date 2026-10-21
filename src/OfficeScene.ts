@@ -16,6 +16,8 @@ type Person = {
   running: boolean;
   /** Стоит у стола CEO (между пробежкой туда и обратно). */
   atCeo: boolean;
+  /** Текущая пробежка: при новой задаче её обрывают. */
+  chain?: Phaser.Tweens.TweenChain;
 };
 
 // Порядок отрисовки: столы → сотрудники на месте → подписи → бегущие сотрудники.
@@ -24,6 +26,8 @@ const DEPTH_LABEL = 10;
 const DEPTH_RUNNING = 30;
 // Сколько CEO держит итоговый отчёт перед командой.
 const REPORT_HOLD_MS = 4500;
+// Пробежка прежней задачи прервана началом новой: задание в очереди дальше не идёт.
+const STALE = new Error('stale visit');
 
 export class OfficeScene extends Phaser.Scene {
   private people = new Map<string, Person>();
@@ -38,6 +42,13 @@ export class OfficeScene extends Phaser.Scene {
   private ceoDesk?: Point;
   private inboxCount = 0;
   private initialized = false;
+  // Номер задачи на сцене: растёт при каждом новом распределении заданий. Пробежки прежней задачи
+  // по нему видят, что их прервали, и не трогают сцену новой.
+  private epoch = 0;
+  private abortRuns = new Set<() => void>();
+  private startEpoch: () => void = () => {};
+  // Выполняется, когда начинается следующая задача.
+  private nextEpoch: Promise<void> = this.epochSignal();
 
   constructor() {
     super('OfficeScene');
@@ -187,9 +198,37 @@ export class OfficeScene extends Phaser.Scene {
     }
   }
 
-  private briefing(agentIds: string[]) {
+  private epochSignal() {
+    return new Promise<void>(resolve => { this.startEpoch = resolve; });
+  }
+
+  /** Новая задача: прервать пробежки прежней и вернуть всех за столы. */
+  private resetVisits() {
+    this.epoch++;
+    this.startEpoch();
+    this.nextEpoch = this.epochSignal();
+    for (const person of this.people.values()) {
+      person.chain?.stop();
+      person.chain = undefined;
+      person.container.setPosition(person.home.x, person.home.y).setDepth(DEPTH_AT_DESK);
+      person.running = false;
+      person.atCeo = false;
+      person.paper.setVisible(false);
+      this.animateFigure(person);
+    }
+    // Остановленная цепочка не вызывает onComplete: отпустить ждущие её задания вручную.
+    for (const abort of [...this.abortRuns]) abort();
+    this.abortRuns.clear();
+    for (const bubble of this.bubbles.values()) bubble.destroy();
+    this.bubbles.clear();
+    this.visits.clear();
+    this.reportCrew = new Set();
     this.inboxCount = 0;
     this.drawInbox();
+  }
+
+  private briefing(agentIds: string[]) {
+    this.resetVisits();
     this.say('ceo', 'Раздаю задания', 2600);
     agentIds.forEach((id, index) => this.enqueue(id, async () => {
       // Не всей толпой разом.
@@ -222,9 +261,11 @@ export class OfficeScene extends Phaser.Scene {
 
   /** Итог: дождаться, пока все донесут результаты, собрать команду у CEO и объявить отчёт. */
   private async report(agentIds: string[]) {
+    const epoch = this.epoch;
     const crew = agentIds.filter(id => this.people.has(id) && CEO_SPOTS[id]);
     this.reportCrew = new Set(crew);
     await Promise.all([...this.visits.values()]);
+    if (epoch !== this.epoch) return;
     let dismiss!: () => void;
     const dismissed = new Promise<void>(resolve => { dismiss = resolve; });
     const arrivals = crew.map(id => new Promise<void>(arrived => {
@@ -235,12 +276,15 @@ export class OfficeScene extends Phaser.Scene {
         await this.goHome(id);
       });
     }));
-    await Promise.all(arrivals);
+    // Если пока команда собиралась, началась новая задача, отчёт прежней не объявляем.
+    await Promise.race([Promise.all(arrivals), this.nextEpoch]);
+    if (epoch !== this.epoch) return;
     const ceo = this.people.get('ceo');
     ceo?.paper.setVisible(true);
     this.say('ceo', 'Итоговый отчёт готов!', REPORT_HOLD_MS);
     if (ceo) this.tweens.add({ targets: ceo.figure, y: -5, duration: 160, yoyo: true, repeat: 2, onComplete: () => this.animateFigure(ceo) });
     this.time.delayedCall(REPORT_HOLD_MS, () => {
+      if (epoch !== this.epoch) return;
       ceo?.paper.setVisible(false);
       this.reportCrew = new Set();
       dismiss();
@@ -249,7 +293,10 @@ export class OfficeScene extends Phaser.Scene {
 
   private enqueue(agentId: string, job: () => Promise<void>) {
     if (!this.people.has(agentId) || !CEO_SPOTS[agentId]) return;
-    const next = (this.visits.get(agentId) || Promise.resolve()).then(job).catch(() => undefined);
+    const epoch = this.epoch;
+    const next = (this.visits.get(agentId) || Promise.resolve())
+      .then(() => epoch === this.epoch ? job() : undefined)
+      .catch(() => undefined);
     this.visits.set(agentId, next);
   }
 
@@ -267,21 +314,28 @@ export class OfficeScene extends Phaser.Scene {
     person.container.setDepth(DEPTH_AT_DESK);
   }
 
+  /** Бег по точкам. Отклоняется (STALE), если за это время началась новая задача. */
   private run(person: Person, points: Point[]): Promise<void> {
     if (!points.length) return Promise.resolve();
+    const epoch = this.epoch;
     const durations = segmentDurations({ x: person.container.x, y: person.container.y }, points);
     person.running = true;
     person.container.setDepth(DEPTH_RUNNING);
     this.animateFigure(person);
-    return new Promise(resolve => {
-      this.tweens.chain({
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        this.abortRuns.delete(finish);
+        if (epoch !== this.epoch) return reject(STALE);
+        person.chain = undefined;
+        person.running = false;
+        this.animateFigure(person);
+        resolve();
+      };
+      this.abortRuns.add(finish);
+      person.chain = this.tweens.chain({
         targets: person.container,
         tweens: points.map((point, index) => ({ x: point.x, y: point.y, duration: durations[index], ease: 'Linear' })),
-        onComplete: () => {
-          person.running = false;
-          this.animateFigure(person);
-          resolve();
-        }
+        onComplete: finish
       });
     });
   }
@@ -315,7 +369,11 @@ export class OfficeScene extends Phaser.Scene {
     }
   }
 
+  /** Пауза. Отклоняется (STALE), если за это время началась новая задача. */
   private wait(ms: number) {
-    return new Promise<void>(resolve => { this.time.delayedCall(ms, () => resolve()); });
+    const epoch = this.epoch;
+    return new Promise<void>((resolve, reject) => {
+      this.time.delayedCall(ms, () => epoch === this.epoch ? resolve() : reject(STALE));
+    });
   }
 }

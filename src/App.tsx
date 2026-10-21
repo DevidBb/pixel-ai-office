@@ -68,6 +68,10 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(false);
   // Уже показанные на сцене события: при переподключении сервер присылает их повторно.
   const shownCues = useRef(new Set<string>());
+  // Для задачи, к которой страница подключилась после перезагрузки: события до этого номера — история.
+  const historyUntil = useRef(new Map<string, number>());
+  // Последняя задача, за которой следит страница: уведомление об отчёте — только для неё.
+  const latestTaskRef = useRef<string | null>(null);
   // Задача, о готовом отчёте которой CEO сейчас сообщает, и отчёты, раскрытые автоматически.
   const [reportReady, setReportReady] = useState<string | null>(null);
   const [openedReports, setOpenedReports] = useState<string[]>([]);
@@ -137,14 +141,18 @@ export default function App() {
   function handleApiEvent(taskId: string, event: RunEvent) {
     updateTask(taskId, task => reduceTask(task, event));
     // Пробежки к CEO — только для событий, которые происходят сейчас, а не при повторе истории.
-    const cue = cueForEvent(event, { seen: shownCues.current, key: event.seq ? `${taskId}:${event.seq}` : undefined });
+    const cue = cueForEvent(event, {
+      historyUntil: historyUntil.current.get(taskId) ?? 0,
+      seen: shownCues.current,
+      key: event.seq ? `${taskId}:${event.seq}` : undefined
+    });
     if (cue) {
       // Во вкладке в фоне сцена стоит на паузе: пробежки не копятся до возвращения.
       const played = document.hidden ? Promise.resolve() : sceneRef.current?.playCue(cue) ?? Promise.resolve();
       if (cue.kind === 'report') {
         void Promise.race([played, sleep(REPORT_NOTICE_FALLBACK_MS)]).then(() => {
-          // Пока CEO объявлял отчёт, могла начаться новая задача — тогда уведомление о старой не нужно.
-          if (activeTaskRef.current && activeTaskRef.current !== taskId) return;
+          // Пока CEO объявлял отчёт, могла начаться (и даже закончиться) новая задача — тогда уведомление о старой не нужно.
+          if (latestTaskRef.current !== taskId) return;
           setReportReady(taskId);
           setOpenedReports(current => current.includes(taskId) ? current : [...current, taskId]);
         });
@@ -185,6 +193,7 @@ export default function App() {
    */
   async function followRun(taskId: string, runId: string, token = { cancelled: false }) {
     activeTaskRef.current = taskId;
+    latestTaskRef.current = taskId;
     setIsRunning(true);
     for (let attempt = 0; attempt <= RECONNECT_ATTEMPTS; attempt++) {
       if (token.cancelled || activeTaskRef.current !== taskId) return;
@@ -238,8 +247,11 @@ export default function App() {
     const token = { cancelled: false };
     void (async () => {
       let restored: OfficeTask[] = [];
+      // Сколько событий у каждой задачи уже было на сервере в момент открытия страницы.
+      let eventCounts: Map<string, number> | null = null;
       try {
-        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string }> };
+        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string; events?: number }> };
+        eventCounts = new Map(runs.map(run => [run.id, Number(run.events) || 0]));
         const known = new Set(tasks.map(task => task.runId).filter(Boolean));
         for (const { id } of runs.filter(run => !known.has(run.id))) {
           const response = await fetch(`/api/runs/${id}`);
@@ -252,6 +264,9 @@ export default function App() {
       const unfinished = merged.find(task => RUNNING_STATUSES.includes(task.status));
       if (!unfinished) return;
       if (unfinished.runId) {
+        // Уже случившееся не проигрываем на сцене заново. Если список задач не загрузился, граница
+        // неизвестна — тогда пробежек для этой задачи нет вовсе, следующие задачи покажутся как обычно.
+        historyUntil.current.set(unfinished.id, eventCounts?.get(unfinished.runId) ?? Number.MAX_SAFE_INTEGER);
         void followRun(unfinished.id, unfinished.runId, token);
       } else {
         // Задача из старой версии (до /api/runs) жила в соединении и прервалась вместе со страницей.
@@ -306,6 +321,7 @@ export default function App() {
     setPrompt('');
     setIsRunning(true);
     activeTaskRef.current = taskId;
+    latestTaskRef.current = taskId;
     try {
       const response = await fetch('/api/runs', {
         method: 'POST',

@@ -22,15 +22,6 @@ export const CEO_SPOTS: Record<string, Point> = {
   finance: { x: 235, y: 372 }
 };
 
-/** Событие пришло только что, а не при повторе истории после перезагрузки или переподключения. */
-export const LIVE_WINDOW_MS = 15_000;
-
-export function isLiveEvent(event: RunEvent, now = Date.now()) {
-  // Без времени события приходят только в прежнем режиме /api/execute, а там все события живые.
-  if (typeof event.at !== 'number') return true;
-  return Math.abs(now - event.at) <= LIVE_WINDOW_MS;
-}
-
 export type SceneCue =
   | { kind: 'briefing'; agentIds: string[] }
   | { kind: 'deliver'; agentId: string; failed: boolean }
@@ -39,11 +30,14 @@ export type SceneCue =
 /**
  * Что показать на сцене в ответ на событие задачи: сотрудники бегут к CEO за заданием (plan),
  * относят результат или сообщают о неудаче (agent-result / agent-error), собираются на итоговый отчёт (final).
- * `seen` — ключи уже показанных событий: при переподключении сервер присылает недавние события повторно.
+ * `historyUntil` — номер последнего события, которое уже было на сервере, когда страница открылась:
+ * такие события — история, их не проигрываем (часы браузера и сервера для этого не нужны).
+ * `seen` — ключи уже показанных событий: при переподключении сервер присылает все события заново.
  */
-export function cueForEvent(event: RunEvent, { now = Date.now(), seen, key }: { now?: number; seen?: Set<string>; key?: string } = {}): SceneCue | null {
+export function cueForEvent(event: RunEvent, { historyUntil = 0, seen, key }: { historyUntil?: number; seen?: Set<string>; key?: string } = {}): SceneCue | null {
   const cue = rawCue(event);
-  if (!cue || !isLiveEvent(event, now)) return null;
+  if (!cue) return null;
+  if (typeof event.seq === 'number' && event.seq <= historyUntil) return null;
   if (seen && key) {
     if (seen.has(key)) return null;
     seen.add(key);
