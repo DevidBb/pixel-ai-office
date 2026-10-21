@@ -563,3 +563,21 @@ test('Codex, 6-й круг: метка-содержимое, обращение 
   assert.equal(wantsWholeTeam('Хочу кофейню — подключи всю команду'), true, 'короткое вступление перед тире — не цитата');
   assert.deepEqual(routeByRules('Не всех специалистов, а только Luma 4 — слоган').agentIds, ['creator']);
 });
+
+test('Codex, 7-й круг: отказ сразу после просьбы, перевод на новой строке, «не всех — а весь офис»', () => {
+  assert.deepEqual(routeByRules('Подключи всю команду? Нет, только Luma 4 — слоган').agentIds, ['creator']);
+  assert.deepEqual(routeByRules('Подключи всю команду — не надо, только Luma 4 — слоган').agentIds, ['creator']);
+  assert.equal(wantsWholeTeam('Подключи всю команду: не надо экономить на идеях'), true, '«не надо экономить» — не отказ от команды');
+  assert.deepEqual(routeByRules('Переведи на английский:\nПодключи всю команду: придумай слоган.').agentIds, ['creator']);
+  assert.equal(wantsWholeTeam('Хочу кофейню.\nПодключи всю команду: придумай слоган.'), true, 'новая строка без двоеточия — новое предложение');
+  assert.deepEqual(routeByRules('Не всех специалистов — а весь офис подключи: придумайте слоган').agentIds, ALL);
+});
+
+// Ввод до 5000 символов: правила не должны перебирать пробелы (раньше 5000 пробелов — минуты на одну задачу).
+test('разбор длинной строки пробелов и повторов укладывается в секунду', () => {
+  for (const goal of [' '.repeat(4980) + 'всю команду', 'Напиши' + ' '.repeat(4900) + 'слоган всей командой', 'подключи всю команду '.repeat(238)]) {
+    const started = performance.now();
+    wantsWholeTeam(goal);
+    assert.ok(performance.now() - started < 1000, `${Math.round(performance.now() - started)} мс`);
+  }
+});

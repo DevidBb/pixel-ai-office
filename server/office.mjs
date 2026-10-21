@@ -60,7 +60,9 @@ const ADJACENT_EXCLUDE = String.raw`(?:кроме|исключая|за\s+иск
 const EXCLUDE_VERB = String.raw`(?:исключи(?:те)?|убери(?:те)?|отключи(?:те)?` +
   String.raw`|не\s+(?:подключай|привлекай|задействуй|используй|назначай|включай|добавляй|приглашай|зови|бери|трогай|ставь)(?:те)?` +
   String.raw`|не\s+(?:надо|нужно|стоит|будем|хочу)\s+(?:подключать|привлекать|задействовать|использовать|назначать|включать|добавлять|приглашать|звать|брать|трогать))`;
-const POLITE = String.raw`\s*,?\s*(?:пожалуйста|плиз)\s*,?`;
+// Без двух «\s*» подряд вокруг необязательной запятой: на длинной строке пробелов движок перебирал все способы
+// поделить пробелы между ними (5000 пробелов — минуты на одну задачу).
+const POLITE = String.raw`\s*(?:,\s*)?(?:пожалуйста|плиз)\s*,?`;
 // До четырёх слов без знаков препинания (запятая — только вокруг «пожалуйста»): «Не используй клише, Luma 4 — …» не исключение.
 const EXCLUDE_GAP = String.raw`(?:${POLITE}|\s+[\p{L}\d-]+){0,4}`;
 const NEGATION_BEFORE = new RegExp(
@@ -71,7 +73,8 @@ const NEGATION_BEFORE = new RegExp(
 // были просьбой, а «всю» не распознавалось. Решает фрагмент фразы вокруг слова — до запятой, точки, двоеточия,
 // «?», тире или союза; «пожалуйста» в запятых фрагмент не делит.
 const FRAGMENT_SPLIT = /[,.;:!?\n—–]|(?<!\p{L})(?:и|а|но|или|либо)(?!\p{L})/iu;
-const POLITE_INSERT = new RegExp(POLITE, 'giu');
+// Совпадение начинается только с начала серии пробелов, а не с каждого пробела в ней.
+const POLITE_INSERT = new RegExp(String.raw`(?<!\s)${POLITE}`, 'giu');
 const fragmentBefore = (goal, start) => goal.slice(0, start).replace(POLITE_INSERT, ' ').split(FRAGMENT_SPLIT).at(-1);
 const fragmentAfter = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ').split(FRAGMENT_SPLIT)[0];
 // «всю команду» не поручение офису, если это цитата или задача уже адресована одному сотруднику:
@@ -89,7 +92,8 @@ const VERB_LIKE = /(?:и|й|ь|ти)(?:те)?(?!\p{L})/iu;
 const SENTENCE_START = /[.!?\n](?=[^.!?\n]*$)/u;
 const ADDRESSED_AGENT = /(?<![\p{L}\d])(?:luma|люма)\s*[-#№]?\s*[2-6](?!\d)/iu;
 function notForOffice(goal, start) {
-  const head = goal.slice(0, start).replace(POLITE_INSERT, ' ');
+  // Перенос строки после двоеточия не начинает новое предложение: «Переведи на английский:\n<текст>».
+  const head = goal.slice(0, start).replace(POLITE_INSERT, ' ').replace(/:[^\S\n]*\n\s*/gu, ': ');
   const count = pattern => (head.match(pattern) || []).length;
   if (count(/«/g) > count(/»/g) || count(/["“”]/g) % 2 === 1) return true;
   const sentence = head.slice(head.search(SENTENCE_START) + 1);
@@ -118,6 +122,9 @@ const CALL_BEFORE = new RegExp(
 const EMPTY_OR_EXCEPTION = /^\s*(?:(?:кроме|за\s+исключением|помимо)\s[\s\S]*)?$/iu;
 // «чтобы» — цель, а не просьба: «Вместо того, чтобы звать всю команду, …» (запятая отрезает «вместо»).
 const FRAGMENT_NEGATION = /(?<!\p{L})(?:не|ни|нет|хватит|незачем|необязательно|вместо|чтобы)(?!\p{L})/iu;
+// «Подключи всю команду? Нет, только Luma 4», «Подключи всю команду — не надо, …»: следующий фрагмент отменяет просьбу.
+// «Подключи всю команду: не надо экономить» — отказ не от команды.
+const REFUSAL_NEXT = /^\s*[?!.;:—–-]\s*(?:нет|не\s+(?:надо|нужно|стоит))\s*(?:[,.!;—–-]|$)/iu;
 // «Не забудь подключить всю команду», «Не стесняйся позвать всю команду» — по смыслу не отказ.
 const NOT_A_REFUSAL = /(?<!\p{L})не\s+(?:забудь|забудьте|забывай|забывайте|стесняйся|стесняйтесь)(?!\p{L})/giu;
 
@@ -132,7 +139,7 @@ const REFUSAL_BEFORE = new RegExp(String.raw`^\s*(?:(?:мне|нам)\s+нужн
   String.raw`|(?:можно|можешь|можете|можем|давай|давайте|чтобы|лучше(?:\s+бы)?|хорошо\s+бы)\s+не(?:\s+будем)?\s+${CALL_INFINITIVE})\s+$`, 'iu');
 const NOTHING_AFTER_REFUSAL = /^\s*(?:нуж\p{L}*|требуются)?\s*$/iu;
 // «Не всех специалистов, а вообще весь офис подключи» — противопоставление снова про всех: не отказ.
-const CONTRAST_TO_ALL = /^\s*,?\s*а\s+(?:[\p{L}-]+\s+){0,2}?(?:весь|всю|всех|все|вся|всем)(?!\p{L})/iu;
+const CONTRAST_TO_ALL = /^\s*[,—–-]?\s*а\s+(?:[\p{L}-]+\s+){0,2}?(?:весь|всю|всех|все|вся|всем)(?!\p{L})/iu;
 // «Всех специалистов подключать не надо», «Все специалисты не нужны», «Всех лучше не звать». «Исключать не нужно» — не отказ.
 const REFUSAL_AFTER = new RegExp(String.raw`^(?:\s+лучше)?(?:\s+${CALL_INFINITIVE})?\s+не\s+(?:${REFUSE_VERB}|${CALL_INFINITIVE}|надо|нужно|стоит|требуется|нуж(?:ен|на|ны))\s*$`, 'iu');
 const ADDRESS_TO_ALL = new RegExp(String.raw`^\s+не\s+${REFUSE_VERB}\s*$`, 'iu');
@@ -287,7 +294,8 @@ export function wantsWholeTeam(goal) {
     const after = fragmentAfter(goal, match.index + match[0].length);
     const form = match[0].match(/^\p{L}+/u)[0].toLowerCase();
     if (form === 'всю') {
-      return CALL_BEFORE.test(before) && EMPTY_OR_EXCEPTION.test(after) && !notForOffice(goal, match.index) &&
+      const next = goal.slice(match.index + match[0].length).replace(POLITE_INSERT, ' ').slice(after.length);
+      return CALL_BEFORE.test(before) && EMPTY_OR_EXCEPTION.test(after) && !notForOffice(goal, match.index) && !REFUSAL_NEXT.test(next) &&
         !FRAGMENT_NEGATION.test(`${before} ${after}`.replace(NOT_A_REFUSAL, ' '));
     }
     // «всем», «всеми», «всей» не бывают объектом отказа («Всем пятерым не нужен отчёт» — про отчёт).
