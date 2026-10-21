@@ -85,6 +85,9 @@ export type RunEvent = {
   stats?: ModelStats;
   foreign?: string[];
   text?: string;
+  /** Кто сдал результат и кто не справился (событие final). */
+  completedAgents?: string[];
+  failedAgents?: string[];
 };
 
 /** Задача из GET /api/runs/:id. */
