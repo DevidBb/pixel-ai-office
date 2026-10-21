@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
+import { cueForEvent } from './officeMoves';
 import './stage2.css';
 
 const initialAgents: Agent[] = [
@@ -45,6 +46,8 @@ function loadSavedTasks(): OfficeTask[] {
 const RUNNING_STATUSES: TaskStatus[] = ['planning', 'working', 'review'];
 const RECONNECT_DELAY_MS = 2_000;
 const RECONNECT_ATTEMPTS = 30;
+// Если сцена не загрузилась или зависла, уведомление об отчёте всё равно появится.
+const REPORT_NOTICE_FALLBACK_MS = 20_000;
 const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
 export default function App() {
@@ -63,6 +66,11 @@ export default function App() {
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const [apiModel, setApiModel] = useState('');
   const [isRunning, setIsRunning] = useState(false);
+  // Уже показанные на сцене события: при переподключении сервер присылает их повторно.
+  const shownCues = useRef(new Set<string>());
+  // Задача, о готовом отчёте которой CEO сейчас сообщает, и отчёты, раскрытые автоматически.
+  const [reportReady, setReportReady] = useState<string | null>(null);
+  const [openedReports, setOpenedReports] = useState<string[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,6 +136,20 @@ export default function App() {
 
   function handleApiEvent(taskId: string, event: RunEvent) {
     updateTask(taskId, task => reduceTask(task, event));
+    // Пробежки к CEO — только для событий, которые происходят сейчас, а не при повторе истории.
+    const cue = cueForEvent(event, { seen: shownCues.current, key: event.seq ? `${taskId}:${event.seq}` : undefined });
+    if (cue) {
+      // Во вкладке в фоне сцена стоит на паузе: пробежки не копятся до возвращения.
+      const played = document.hidden ? Promise.resolve() : sceneRef.current?.playCue(cue) ?? Promise.resolve();
+      if (cue.kind === 'report') {
+        void Promise.race([played, sleep(REPORT_NOTICE_FALLBACK_MS)]).then(() => {
+          // Пока CEO объявлял отчёт, могла начаться новая задача — тогда уведомление о старой не нужно.
+          if (activeTaskRef.current && activeTaskRef.current !== taskId) return;
+          setReportReady(taskId);
+          setOpenedReports(current => current.includes(taskId) ? current : [...current, taskId]);
+        });
+      }
+    }
     // Сотрудники на сцене — только для задачи, которая идёт сейчас.
     if (event.type === 'agent-status' && event.agentId && event.status) {
       updateAgent(event.agentId, agent => ({ ...agent, status: event.status!, task: event.task || agent.task }));
@@ -242,6 +264,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function openReport(taskId: string) {
+    const details = document.getElementById(`report-${taskId}`);
+    if (details instanceof HTMLDetailsElement) {
+      details.open = true;
+      details.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    setReportReady(null);
+  }
+
   function repeatTask(task: OfficeTask) {
     setPrompt(task.title);
     promptRef.current?.focus();
@@ -271,6 +302,7 @@ export default function App() {
       logs: [makeLog('ceo', 'Задача принята. CEO готовит план и распределяет работу.')]
     };
     setTasks(current => [task, ...current]);
+    setReportReady(null);
     setPrompt('');
     setIsRunning(true);
     activeTaskRef.current = taskId;
@@ -317,6 +349,7 @@ export default function App() {
   const completed = tasks.filter(task => task.status === 'done').length;
   const activeAgents = agents.filter(agent => agent.status === 'working' || agent.status === 'thinking').length;
   const selectedAgentInfo = agents.find(agent => agent.id === selectedAgent) || agents[0];
+  const reportTask = reportReady ? tasks.find(task => task.id === reportReady && task.result) : undefined;
 
   return (
     <main className="app-shell">
@@ -330,7 +363,7 @@ export default function App() {
 
       <section className="workspace">
         <div className="section-heading">
-          <div><p className="eyebrow">ЦЕЛИ → ПЛАН → РАБОТА КОМАНДЫ → ПРОВЕРКА</p><h1>Офис агентов</h1><p className="subheading">CEO сразу раздаёт задания. Каждый специалист выполняет только своё, CEO сводит настоящие результаты в итоговый отчёт.</p></div>
+          <div><p className="eyebrow">ЦЕЛИ → ПЛАН → РАБОТА КОМАНДЫ → ПРОВЕРКА</p><h1>Офис агентов</h1><p className="subheading">CEO раздаёт задания. Каждый специалист выполняет только своё и относит результат CEO, а в конце CEO даёт итоговый отчёт.</p></div>
           <div className="date-chip">⌁ {new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
         </div>
 
@@ -349,6 +382,12 @@ export default function App() {
           <section className="office-panel">
             <div className="panel-header"><div><span className="panel-kicker">FLOOR 01</span><h2>Основной офис</h2></div><span className="tiny-status"><i /> {isRunning ? 'КОМАНДА РАБОТАЕТ' : 'ГОТОВ К РАБОТЕ'}</span></div>
             <div className="scene-frame"><div ref={gameHost} className="game-host" />{sceneState !== 'ready' && <div className="scene-placeholder" role="status">{sceneState === 'error' ? 'Не удалось загрузить сцену офиса. Работа команды и задачи не затронуты.' : 'Загрузка сцены офиса…'}</div>}</div>
+            {reportTask && <div className="report-ready" role="status">
+              <span className="report-ready-icon">C</span>
+              <span className="report-ready-copy"><strong>Luma 1 · CEO: итоговый отчёт готов</strong><small>{reportTask.title}</small></span>
+              <button type="button" className="report-ready-open" onClick={() => openReport(reportTask.id)}>Открыть отчёт ↓</button>
+              <button type="button" className="report-ready-close" aria-label="Скрыть уведомление" onClick={() => setReportReady(null)}>×</button>
+            </div>}
             <div className="legend"><span><i className="dot idle" />Ожидает</span><span><i className="dot working" />Работает</span><span><i className="dot done" />Готово</span><span><i className="dot error" />Ошибка</span></div>
           </section>
 
@@ -362,7 +401,7 @@ export default function App() {
                   <span className={`status-tag ${agent.status}`}><i />{agentStatusLabel[agent.status]}</span>
                 </button>)}
               </div>
-              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, распределяет подзадачи, собирает результаты и проверяет итог.' : 'Получает от CEO отдельное задание и пишет только свою часть. Результаты коллег ему не передаются.'}</p></div>
+              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, раздаёт задания, принимает результаты у сотрудников и в конце даёт итоговый отчёт.' : 'Получает от CEO отдельное задание, пишет только свою часть и относит результат CEO. Результаты коллег ему не передаются.'}</p></div>
             </section>
 
             <section className="panel task-panel">
@@ -411,7 +450,7 @@ export default function App() {
                       </div>}
                     </details>;
                   })}</div>}
-                  {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
+                  {task.result && <details className="final-result" id={`report-${task.id}`} open={task.status === 'error' || openedReports.includes(task.id)}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
                   {(task.logs || []).length > 0 && <details className="collaboration-log"><summary>Журнал действий ({task.logs!.length})</summary><div className="log-entries">{task.logs!.map(log => {
                     const agent = agents.find(item => item.id === log.agentId);
                     return <div className={`log-entry ${log.kind || 'info'}`} key={log.id}><time>{log.time}</time><strong>{agent?.name || log.agentId}</strong><span>{log.message}</span></div>;
