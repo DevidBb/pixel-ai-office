@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, routeByExplicit, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { spawnSync } from 'node:child_process';
+import { routeByRules, routeByExplicit, normalizeGoal, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -355,6 +356,37 @@ test('нераспознанное «не» рядом с именем: сотр
   assert.equal(uncertainNote(COFFEE_GOAL, Object.keys(COFFEE_ASSIGNMENTS)), '');
 });
 
+// Задача до 5000 символов разбирается синхронно: долгий разбор останавливает весь сервер. Разбор — в отдельном
+// процессе с внешним тайм-аутом: если медленное выражение вернётся, тест упадёт, а не повиснет.
+function parsesQuickly(goal, ms = 3000) {
+  const office = new URL('../server/office.mjs', import.meta.url).href;
+  const code = `import(${JSON.stringify(office)}).then(o => { const g = o.normalizeGoal(${JSON.stringify(goal)});` +
+    ' const r = o.routeByExplicit(g, 5) || o.routeByRules(g, 5) || o.fallbackRoute(g, 5); o.buildPlan(g, r, {}); o.wantsWholeTeam(g); })';
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { timeout: ms });
+  return !result.error && result.status === 0;
+}
+
+test('длинные серии разделителей и пробелов разбираются быстро (раньше — секунды и часы)', () => {
+  const S = ' '.repeat(2400);
+  for (const goal of [';'.repeat(40) + 'о', ','.repeat(40) + 'о', ';'.repeat(4999) + 'о',
+    'не подключай' + (' '.repeat(8) + 'пожалуйста').repeat(4) + ' '.repeat(8) + '! Luma 4 — слоган',
+    'x' + S + ';' + S + 'о', 'Luma' + S + S + 'о', 'всем' + S + S + 'о', 'Luma 2' + S + 'о Luma 4 — слоган',
+    'не подключай' + S + '! Luma 4 — слоган', 'Luma 4 — x' + S + 'о', 'никого '.repeat(700) + ': Luma 4 — слоган',
+    'не '.repeat(1600) + ': Luma 4 — слоган', '1'.repeat(4999) + 'о']) {
+    assert.ok(parsesQuickly(goal), `${JSON.stringify(goal.slice(0, 30))}… (${goal.length} символов)`);
+  }
+  // Хвост из разделителей по-прежнему убирается, как до исправления.
+  assert.equal(parseAssignments('Сделай план;;; ,,').context, 'Сделай план');
+  assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
+});
+
+test('normalizeGoal: серии пробелов — один пробел, переносы — не больше двух подряд, смысл задачи тот же', () => {
+  assert.equal(normalizeGoal('  Luma 4\t\t—   слоган\r\n\r\n\r\n\r\nLuma 2 — рынок  '), 'Luma 4 — слоган\n\nLuma 2 — рынок');
+  assert.equal(normalizeGoal('1. Рынок\n2. Слоган'), '1. Рынок\n2. Слоган');
+  const goal = 'Luma 2 —   3 группы клиентов;   Luma 4 —\tслоган';
+  assert.deepEqual(routeByExplicit(normalizeGoal(goal))?.agentIds, routeByExplicit(goal)?.agentIds);
+});
+
 test('правило реальности: творческое — по своему поручению, новизна — и по контексту, отрицание и анализ — не творчество', () => {
   const rule = goal => {
     const route = routeByExplicit(goal) || routeByRules(goal) || fallbackRoute(goal);
@@ -375,17 +407,4 @@ test('правило реальности: творческое — по сво�
   assert.deepEqual(rule('Luma 2 — 3 группы клиентов; Luma 3 — предложи 3 необычных напитка'), { research: 'реальн', product: 'творч' });
   assert.deepEqual(rule('Luma 3 — придумай 3 слогана'), { product: 'творч' });
   assert.deepEqual(rule('Luma 2 — изучи нейминг конкурентов'), { research: 'реальн' });
-});
-
-// Задача до 5000 символов разбирается синхронно: долгий разбор останавливает весь сервер.
-test('длинная серия «;» или «,» разбирается быстро (раньше 27 знаков — секунды, 40 — часы)', () => {
-  for (const goal of [';'.repeat(40) + 'о', ','.repeat(40) + 'о', 'Luma 4 — слоган' + ' ;,'.repeat(1600) + 'кофейня', ';'.repeat(4999) + 'о']) {
-    const started = performance.now();
-    routeByRules(goal);
-    parseAssignments(goal);
-    assert.ok(performance.now() - started < 1000, `${Math.round(performance.now() - started)} мс на ${JSON.stringify(goal.slice(0, 20))}…`);
-  }
-  // Хвост из разделителей по-прежнему убирается, как до исправления.
-  assert.equal(parseAssignments('Сделай план;;; ,,').context, 'Сделай план');
-  assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
 });
