@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { OfficeScene } from './OfficeScene';
 import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
+import { cueForEvent, historyBoundary } from './officeMoves';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import './stage2.css';
 
@@ -45,6 +46,8 @@ function loadSavedTasks(): OfficeTask[] {
 const RUNNING_STATUSES: TaskStatus[] = ['planning', 'working', 'review'];
 const RECONNECT_DELAY_MS = 2_000;
 const RECONNECT_ATTEMPTS = 30;
+// Если сцена не загрузилась или зависла, уведомление об отчёте всё равно появится.
+const REPORT_NOTICE_FALLBACK_MS = 20_000;
 const sleep = (ms: number) => new Promise(resolve => window.setTimeout(resolve, ms));
 
 export default function App() {
@@ -62,6 +65,17 @@ export default function App() {
   const [selectedAgent, setSelectedAgent] = useState('ceo');
   const [apiConfigured, setApiConfigured] = useState<boolean | null>(null);
   const [apiModel, setApiModel] = useState('');
+  // Уже показанные на сцене события: при переподключении сервер присылает их повторно.
+  const shownCues = useRef(new Set<string>());
+  // Для задачи, к которой страница подключилась после перезагрузки: события до этого номера — история.
+  const historyUntil = useRef(new Map<string, number>());
+  // Последняя задача, за которой следит страница: уведомление об отчёте — только для неё.
+  const latestTaskRef = useRef<string | null>(null);
+  // Задачи, запущенные на этой странице: их серверные копии из истории второй раз не восстанавливаем.
+  const createdRuns = useRef(new Set<string>());
+  // Задача, о готовом отчёте которой CEO сейчас сообщает, и отчёты, раскрытые автоматически.
+  const [reportReady, setReportReady] = useState<string | null>(null);
+  const [openedReports, setOpenedReports] = useState<string[]>([]);
   const [isRunning, setIsRunning] = useState(false);
 
   useEffect(() => {
@@ -128,6 +142,24 @@ export default function App() {
 
   function handleApiEvent(taskId: string, event: RunEvent) {
     updateTask(taskId, task => reduceTask(task, event));
+    // Пробежки к CEO — только для событий, которые происходят сейчас, а не при повторе истории.
+    const cue = cueForEvent(event, {
+      historyUntil: historyUntil.current.get(taskId) ?? 0,
+      seen: shownCues.current,
+      key: event.seq ? `${taskId}:${event.seq}` : undefined
+    });
+    if (cue) {
+      // Во вкладке в фоне сцена стоит на паузе: пробежки не копятся до возвращения (quiet).
+      const played = sceneRef.current?.playCue(cue, { quiet: document.hidden }) ?? Promise.resolve();
+      if (cue.kind === 'report') {
+        void Promise.race([played, sleep(REPORT_NOTICE_FALLBACK_MS)]).then(() => {
+          // Пока CEO объявлял отчёт, могла начаться (и даже закончиться) новая задача — тогда уведомление о старой не нужно.
+          if (latestTaskRef.current !== taskId) return;
+          setReportReady(taskId);
+          setOpenedReports(current => current.includes(taskId) ? current : [...current, taskId]);
+        });
+      }
+    }
     // Сотрудники на сцене — только для задачи, которая идёт сейчас.
     if (event.type === 'agent-status' && event.agentId && event.status) {
       updateAgent(event.agentId, agent => ({ ...agent, status: event.status!, task: event.task || agent.task }));
@@ -163,6 +195,7 @@ export default function App() {
    */
   async function followRun(taskId: string, runId: string, token = { cancelled: false }) {
     activeTaskRef.current = taskId;
+    latestTaskRef.current = taskId;
     setIsRunning(true);
     for (let attempt = 0; attempt <= RECONNECT_ATTEMPTS; attempt++) {
       if (token.cancelled || activeTaskRef.current !== taskId) return;
@@ -216,8 +249,11 @@ export default function App() {
     const token = { cancelled: false };
     void (async () => {
       let restored: OfficeTask[] = [];
+      // Задачи на сервере в момент открытия страницы: по ним видно, какие события — уже история.
+      let serverRuns: Array<{ id: string; status?: string; lastSeq?: number }> | null = null;
       try {
-        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string }> };
+        const { runs = [] } = await (await fetch('/api/runs')).json() as { runs?: Array<{ id: string; status?: string; lastSeq?: number }> };
+        serverRuns = runs;
         const known = new Set(tasks.map(task => task.runId).filter(Boolean));
         for (const { id } of runs.filter(run => !known.has(run.id))) {
           const response = await fetch(`/api/runs/${id}`);
@@ -225,11 +261,19 @@ export default function App() {
         }
       } catch { restored = []; /* сервер недоступен — показываем то, что есть в браузере */ }
       if (token.cancelled) return;
-      const merged = mergeHistory(tasks, restored);
-      setTasks(merged);
+      // Пока история грузилась, могли поставить новую задачу: история добавляется к текущему списку, а не к снимку,
+      // а серверная копия этой новой задачи не нужна — она уже в списке под своим номером.
+      const fresh = restored.filter(task => !task.runId || !createdRuns.current.has(task.runId));
+      const merged = mergeHistory(tasks, fresh);
+      setTasks(current => mergeHistory(current, fresh));
+      // Страница уже следит за задачей, которую только что поставили, — другую не подхватываем.
+      if (activeTaskRef.current) return;
       const unfinished = merged.find(task => RUNNING_STATUSES.includes(task.status));
       if (!unfinished) return;
       if (unfinished.runId) {
+        // Уже случившееся не проигрываем на сцене заново. Если список задач не загрузился, граница
+        // неизвестна — тогда пробежек для этой задачи нет вовсе, следующие задачи покажутся как обычно.
+        historyUntil.current.set(unfinished.id, historyBoundary(serverRuns?.find(run => run.id === unfinished.runId)));
         void followRun(unfinished.id, unfinished.runId, token);
       } else {
         // Задача из старой версии (до /api/runs) жила в соединении и прервалась вместе со страницей.
@@ -241,6 +285,15 @@ export default function App() {
     // Только при первом открытии страницы.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function openReport(taskId: string) {
+    const details = document.getElementById(`report-${taskId}`);
+    if (details instanceof HTMLDetailsElement) {
+      details.open = true;
+      details.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    setReportReady(null);
+  }
 
   function repeatTask(task: OfficeTask) {
     setPrompt(task.title);
@@ -271,9 +324,11 @@ export default function App() {
       logs: [makeLog('ceo', 'Задача принята. CEO готовит план и распределяет работу.')]
     };
     setTasks(current => [task, ...current]);
+    setReportReady(null);
     setPrompt('');
     setIsRunning(true);
     activeTaskRef.current = taskId;
+    latestTaskRef.current = taskId;
     try {
       const response = await fetch('/api/runs', {
         method: 'POST',
@@ -282,7 +337,11 @@ export default function App() {
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.runId) throw new Error(data.error || `HTTP ${response.status}`);
-      updateTask(taskId, current => ({ ...current, runId: data.runId }));
+      createdRuns.current.add(data.runId);
+      // История с сервера могла успеть принести копию этой задачи — остаётся только своя карточка.
+      setTasks(current => current
+        .filter(task => task.id === taskId || task.runId !== data.runId)
+        .map(task => task.id === taskId ? { ...task, runId: data.runId } : task));
       await followRun(taskId, data.runId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Неизвестная ошибка.';
@@ -317,6 +376,7 @@ export default function App() {
   const completed = tasks.filter(task => task.status === 'done').length;
   const activeAgents = agents.filter(agent => agent.status === 'working' || agent.status === 'thinking').length;
   const selectedAgentInfo = agents.find(agent => agent.id === selectedAgent) || agents[0];
+  const reportTask = reportReady ? tasks.find(task => task.id === reportReady && task.result) : undefined;
 
   return (
     <main className="app-shell">
@@ -330,7 +390,7 @@ export default function App() {
 
       <section className="workspace">
         <div className="section-heading">
-          <div><p className="eyebrow">ЦЕЛИ → ПЛАН → РАБОТА КОМАНДЫ → ПРОВЕРКА</p><h1>Офис агентов</h1><p className="subheading">CEO сразу раздаёт задания. Каждый специалист выполняет только своё, CEO сводит настоящие результаты в итоговый отчёт.</p></div>
+          <div><p className="eyebrow">ЦЕЛИ → ПЛАН → РАБОТА КОМАНДЫ → ПРОВЕРКА</p><h1>Офис агентов</h1><p className="subheading">CEO раздаёт задания. Каждый специалист выполняет только своё и относит результат CEO, а в конце CEO даёт итоговый отчёт.</p></div>
           <div className="date-chip">⌁ {new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
         </div>
 
@@ -349,6 +409,12 @@ export default function App() {
           <section className="office-panel">
             <div className="panel-header"><div><span className="panel-kicker">FLOOR 01</span><h2>Основной офис</h2></div><span className="tiny-status"><i /> {isRunning ? 'КОМАНДА РАБОТАЕТ' : 'ГОТОВ К РАБОТЕ'}</span></div>
             <div className="scene-frame"><div ref={gameHost} className="game-host" />{sceneState !== 'ready' && <div className="scene-placeholder" role="status">{sceneState === 'error' ? 'Не удалось загрузить сцену офиса. Работа команды и задачи не затронуты.' : 'Загрузка сцены офиса…'}</div>}</div>
+            {reportTask && <div className="report-ready" role="status">
+              <span className="report-ready-icon">C</span>
+              <span className="report-ready-copy"><strong>Luma 1 · CEO: итоговый отчёт готов</strong><small>{reportTask.title}</small></span>
+              <button type="button" className="report-ready-open" onClick={() => openReport(reportTask.id)}>Открыть отчёт ↓</button>
+              <button type="button" className="report-ready-close" aria-label="Скрыть уведомление" onClick={() => setReportReady(null)}>×</button>
+            </div>}
             <div className="legend"><span><i className="dot idle" />Ожидает</span><span><i className="dot working" />Работает</span><span><i className="dot done" />Готово</span><span><i className="dot error" />Ошибка</span></div>
           </section>
 
@@ -362,7 +428,7 @@ export default function App() {
                   <span className={`status-tag ${agent.status}`}><i />{agentStatusLabel[agent.status]}</span>
                 </button>)}
               </div>
-              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, распределяет подзадачи, собирает результаты и проверяет итог.' : 'Получает от CEO отдельное задание и пишет только свою часть. Результаты коллег ему не передаются.'}</p></div>
+              <div className="agent-focus"><small>ВЫБРАННЫЙ СОТРУДНИК</small><strong>{selectedAgentInfo.name} · {selectedAgentInfo.role}</strong><p>{selectedAgentInfo.id === 'ceo' ? 'Принимает твою цель, раздаёт задания, принимает результаты у сотрудников и в конце даёт итоговый отчёт.' : 'Получает от CEO отдельное задание, пишет только свою часть и относит результат CEO. Результаты коллег ему не передаются.'}</p></div>
             </section>
 
             <section className="panel task-panel">
@@ -411,7 +477,7 @@ export default function App() {
                       </div>}
                     </details>;
                   })}</div>}
-                  {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
+                  {task.result && <details className="final-result" id={`report-${task.id}`} open={task.status === 'error' || openedReports.includes(task.id)}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
                   {(task.logs || []).length > 0 && <details className="collaboration-log"><summary>Журнал действий ({task.logs!.length})</summary><div className="log-entries">{task.logs!.map(log => {
                     const agent = agents.find(item => item.id === log.agentId);
                     return <div className={`log-entry ${log.kind || 'info'}`} key={log.id}><time>{log.time}</time><strong>{agent?.name || log.agentId}</strong><span>{log.message}</span></div>;

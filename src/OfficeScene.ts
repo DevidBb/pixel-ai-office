@@ -1,12 +1,54 @@
 import Phaser from 'phaser';
 import type { Agent } from './types';
+import { CEO_SPOTS, PERSON_LIFT, pathToCeo, segmentDurations } from './officeMoves';
+import type { Point, SceneCue } from './officeMoves';
 
 type SceneData = { agents: Agent[] };
 
+/** Сотрудник на сцене: контейнер бегает по офису, фигурка внутри покачивается, пока он работает. */
+type Person = {
+  name: string;
+  container: Phaser.GameObjects.Container;
+  figure: Phaser.GameObjects.Graphics;
+  paper: Phaser.GameObjects.Graphics;
+  home: Point;
+  status: Agent['status'];
+  running: boolean;
+  /** Стоит у стола CEO (между пробежкой туда и обратно). */
+  atCeo: boolean;
+  /** Текущая пробежка: при новой задаче её обрывают. */
+  chain?: Phaser.Tweens.TweenChain;
+};
+
+// Порядок отрисовки: столы → сотрудники на месте → подписи → бегущие сотрудники.
+const DEPTH_AT_DESK = 5;
+const DEPTH_LABEL = 10;
+const DEPTH_RUNNING = 30;
+// Сколько CEO держит итоговый отчёт перед командой.
+const REPORT_HOLD_MS = 4500;
+// Пробежка прежней задачи прервана началом новой: задание в очереди дальше не идёт.
+const STALE = new Error('stale visit');
+
 export class OfficeScene extends Phaser.Scene {
-  private agentSprites = new Map<string, Phaser.GameObjects.Container>();
+  private people = new Map<string, Person>();
   private statusLabels = new Map<string, Phaser.GameObjects.Text>();
+  private bubbles = new Map<string, Phaser.GameObjects.Text>();
+  // Очередь пробежек каждого сотрудника: новая начинается, когда он вернулся с прошлой.
+  private visits = new Map<string, Promise<void>>();
+  private desks: Point[] = [];
+  // Кого CEO ждёт на итоговый отчёт: сдав результат, они остаются у CEO, а не бегают к себе и обратно.
+  private reportCrew = new Set<string>();
+  private inbox?: Phaser.GameObjects.Graphics;
+  private ceoDesk?: Point;
+  private inboxCount = 0;
   private initialized = false;
+  // Номер задачи на сцене: растёт при каждом новом распределении заданий. Пробежки прежней задачи
+  // по нему видят, что их прервали, и не трогают сцену новой.
+  private epoch = 0;
+  private abortRuns = new Set<() => void>();
+  private startEpoch: () => void = () => {};
+  // Выполняется, когда начинается следующая задача.
+  private nextEpoch: Promise<void> = this.epochSignal();
 
   constructor() {
     super('OfficeScene');
@@ -16,6 +58,7 @@ export class OfficeScene extends Phaser.Scene {
     this.cameras.main.setBackgroundColor('#c9c6ba');
     this.drawFloor();
     this.drawRoomDetails();
+    this.desks = data.agents.map(agent => ({ x: agent.x, y: agent.y }));
     data.agents.forEach(agent => this.drawDesk(agent));
     this.scale.on('resize', () => this.drawRoomDetails());
     this.initialized = true;
@@ -84,7 +127,12 @@ export class OfficeScene extends Phaser.Scene {
     g.fillStyle(0x91a8b1, 1); g.fillRect(x - 24, y + 57, 43, 2);
     g.fillRect(x - 24, y + 63, 34, 2);
     g.fillStyle(0x45494a, 1); g.fillRect(x - 4, y + 78, 8, 8);
-    const person = this.add.container(x, y - 31);
+    if (agent.id === 'ceo') {
+      // Стопка сданных результатов на столе CEO.
+      this.inbox = this.add.graphics().setDepth(1);
+      this.ceoDesk = { x, y };
+    }
+    const container = this.add.container(x, y - PERSON_LIFT).setDepth(DEPTH_AT_DESK);
     const p = this.add.graphics();
     p.fillStyle(0x000000, 0.15); p.fillRect(-15, 31, 30, 5);
     p.fillStyle(0x25272b, 1); p.fillRect(-10, 17, 20, 19);
@@ -94,13 +142,21 @@ export class OfficeScene extends Phaser.Scene {
     p.fillStyle(0x292929, 1); p.fillRect(-5, 7, 3, 3); p.fillRect(4, 7, 3, 3);
     p.fillStyle(0xf1d0b0, 1); p.fillRect(-3, 12, 7, 2);
     p.fillStyle(Phaser.Display.Color.HexStringToColor(agent.color).color, 1); p.fillRect(-11, 18, 22, 12);
-    person.add(p);
-    this.agentSprites.set(agent.id, person);
+    // Лист с результатом в руке: виден, пока сотрудник несёт его CEO.
+    const paper = this.add.graphics();
+    paper.fillStyle(0xf7f5ec, 1); paper.fillRect(9, 12, 11, 14);
+    paper.fillStyle(0x9aa3a8, 1); paper.fillRect(11, 15, 7, 1); paper.fillRect(11, 18, 7, 1); paper.fillRect(11, 21, 5, 1);
+    paper.setVisible(false);
+    container.add([p, paper]);
+    this.people.set(agent.id, {
+      name: agent.name, container, figure: p, paper,
+      home: { x, y: y - PERSON_LIFT }, status: agent.status, running: false, atCeo: false
+    });
 
     const label = this.add.text(x, y - 69, `${agent.name} · ${this.statusText(agent.status)}`, {
       fontFamily: 'monospace', fontSize: '11px', color: '#f3f4ef',
       backgroundColor: '#20252bcc', padding: { x: 7, y: 5 }
-    }).setOrigin(0.5);
+    }).setOrigin(0.5).setDepth(DEPTH_LABEL);
     this.statusLabels.set(agent.id, label);
     this.add.text(x, y + 91, agent.role.toUpperCase(), {
       fontFamily: 'monospace', fontSize: '9px', color: '#5b5b54', letterSpacing: 1
@@ -115,13 +171,220 @@ export class OfficeScene extends Phaser.Scene {
     if (!this.initialized) return;
     const label = this.statusLabels.get(agent.id);
     if (label) label.setText(`${agent.name} · ${this.statusText(agent.status)}`);
-    const sprite = this.agentSprites.get(agent.id);
-    if (!sprite) return;
-    this.tweens.killTweensOf(sprite);
-    if (agent.status === 'working' || agent.status === 'thinking') {
-      this.tweens.add({ targets: sprite, y: agent.y - 33, duration: 480, yoyo: true, repeat: -1 });
-    } else {
-      sprite.y = agent.y - 31;
+    const person = this.people.get(agent.id);
+    if (!person) return;
+    person.status = agent.status;
+    this.animateFigure(person);
+  }
+
+  /**
+   * Показывает пробежку к CEO по событию задачи. Promise выполняется, когда CEO объявил итоговый отчёт.
+   * quiet — вкладка в фоне: без пробежек, но новая задача всё равно начинается с чистой сцены, а стопка листов растёт.
+   */
+  playCue(cue: SceneCue, { quiet = false }: { quiet?: boolean } = {}): Promise<void> {
+    if (!this.initialized) return Promise.resolve();
+    if (quiet) {
+      if (cue.kind === 'briefing') this.resetVisits();
+      if (cue.kind === 'deliver' && !cue.failed) {
+        this.inboxCount++;
+        this.drawInbox();
+      }
+      return Promise.resolve();
     }
+    switch (cue.kind) {
+      case 'briefing': this.briefing(cue.agentIds); return Promise.resolve();
+      case 'deliver': this.deliver(cue.agentId, cue.failed); return Promise.resolve();
+      case 'report': return this.report(cue.agentIds);
+    }
+  }
+
+  /** Покачивание: быстрое на бегу, медленное за работой, без движения в остальное время. */
+  private animateFigure(person: Person) {
+    this.tweens.killTweensOf(person.figure);
+    person.figure.y = 0;
+    if (person.running) {
+      this.tweens.add({ targets: person.figure, y: -3, duration: 110, yoyo: true, repeat: -1 });
+    } else if (person.status === 'working' || person.status === 'thinking') {
+      this.tweens.add({ targets: person.figure, y: -2, duration: 480, yoyo: true, repeat: -1 });
+    }
+  }
+
+  private epochSignal() {
+    return new Promise<void>(resolve => { this.startEpoch = resolve; });
+  }
+
+  /** Новая задача: прервать пробежки прежней и вернуть всех за столы. */
+  private resetVisits() {
+    this.epoch++;
+    this.startEpoch();
+    this.nextEpoch = this.epochSignal();
+    for (const person of this.people.values()) {
+      person.chain?.stop();
+      person.chain = undefined;
+      person.container.setPosition(person.home.x, person.home.y).setDepth(DEPTH_AT_DESK);
+      person.running = false;
+      person.atCeo = false;
+      person.paper.setVisible(false);
+      this.animateFigure(person);
+    }
+    // Остановленная цепочка не вызывает onComplete: отпустить ждущие её задания вручную.
+    for (const abort of [...this.abortRuns]) abort();
+    this.abortRuns.clear();
+    for (const bubble of this.bubbles.values()) bubble.destroy();
+    this.bubbles.clear();
+    this.visits.clear();
+    this.reportCrew = new Set();
+    this.inboxCount = 0;
+    this.drawInbox();
+  }
+
+  private briefing(agentIds: string[]) {
+    this.resetVisits();
+    this.say('ceo', 'Раздаю задания', 2600);
+    agentIds.forEach((id, index) => this.enqueue(id, async () => {
+      // Не всей толпой разом.
+      await this.wait(index * 250);
+      await this.goToCeo(id);
+      this.say(id, 'Понял!', 1100);
+      await this.wait(900);
+      await this.goHome(id);
+    }));
+  }
+
+  private deliver(agentId: string, failed: boolean) {
+    this.enqueue(agentId, async () => {
+      const person = this.people.get(agentId)!;
+      person.paper.setVisible(!failed);
+      await this.goToCeo(agentId);
+      this.say(agentId, failed ? 'Не вышло…' : 'Готово, держи!', 1500);
+      await this.wait(700);
+      person.paper.setVisible(false);
+      if (!failed) {
+        this.inboxCount++;
+        this.drawInbox();
+      }
+      this.say('ceo', failed ? `${person.name}, понял, учту` : `Принято, ${person.name}`, 1600);
+      await this.wait(800);
+      if (this.reportCrew.has(agentId)) return;
+      await this.goHome(agentId);
+    });
+  }
+
+  /** Итог: дождаться, пока все донесут результаты, собрать команду у CEO и объявить отчёт. */
+  private async report(agentIds: string[]) {
+    const epoch = this.epoch;
+    const crew = agentIds.filter(id => this.people.has(id) && CEO_SPOTS[id]);
+    this.reportCrew = new Set(crew);
+    await Promise.all([...this.visits.values()]);
+    if (epoch !== this.epoch) return;
+    let dismiss!: () => void;
+    const dismissed = new Promise<void>(resolve => { dismiss = resolve; });
+    const arrivals = crew.map(id => new Promise<void>(arrived => {
+      this.enqueue(id, async () => {
+        if (!this.people.get(id)!.atCeo) await this.goToCeo(id);
+        arrived();
+        await dismissed;
+        await this.goHome(id);
+      });
+    }));
+    // Если пока команда собиралась, началась новая задача, отчёт прежней не объявляем.
+    await Promise.race([Promise.all(arrivals), this.nextEpoch]);
+    if (epoch !== this.epoch) return;
+    const ceo = this.people.get('ceo');
+    ceo?.paper.setVisible(true);
+    this.say('ceo', 'Итоговый отчёт готов!', REPORT_HOLD_MS);
+    if (ceo) this.tweens.add({ targets: ceo.figure, y: -5, duration: 160, yoyo: true, repeat: 2, onComplete: () => this.animateFigure(ceo) });
+    this.time.delayedCall(REPORT_HOLD_MS, () => {
+      if (epoch !== this.epoch) return;
+      ceo?.paper.setVisible(false);
+      this.reportCrew = new Set();
+      dismiss();
+    });
+  }
+
+  private enqueue(agentId: string, job: () => Promise<void>) {
+    if (!this.people.has(agentId) || !CEO_SPOTS[agentId]) return;
+    const epoch = this.epoch;
+    const next = (this.visits.get(agentId) || Promise.resolve())
+      .then(() => epoch === this.epoch ? job() : undefined)
+      .catch(() => undefined);
+    this.visits.set(agentId, next);
+  }
+
+  private async goToCeo(agentId: string) {
+    const person = this.people.get(agentId)!;
+    await this.run(person, pathToCeo(person.home, CEO_SPOTS[agentId], this.desks));
+    person.atCeo = true;
+  }
+
+  private async goHome(agentId: string) {
+    const person = this.people.get(agentId)!;
+    person.atCeo = false;
+    const back = [...pathToCeo(person.home, CEO_SPOTS[agentId], this.desks)].reverse().slice(1);
+    await this.run(person, [...back, person.home]);
+    person.container.setDepth(DEPTH_AT_DESK);
+  }
+
+  /** Бег по точкам. Отклоняется (STALE), если за это время началась новая задача. */
+  private run(person: Person, points: Point[]): Promise<void> {
+    if (!points.length) return Promise.resolve();
+    const epoch = this.epoch;
+    const durations = segmentDurations({ x: person.container.x, y: person.container.y }, points);
+    person.running = true;
+    person.container.setDepth(DEPTH_RUNNING);
+    this.animateFigure(person);
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        this.abortRuns.delete(finish);
+        if (epoch !== this.epoch) return reject(STALE);
+        person.chain = undefined;
+        person.running = false;
+        this.animateFigure(person);
+        resolve();
+      };
+      this.abortRuns.add(finish);
+      person.chain = this.tweens.chain({
+        targets: person.container,
+        tweens: points.map((point, index) => ({ x: point.x, y: point.y, duration: durations[index], ease: 'Linear' })),
+        onComplete: finish
+      });
+    });
+  }
+
+  private say(agentId: string, text: string, ms: number) {
+    const person = this.people.get(agentId);
+    if (!person) return;
+    this.bubbles.get(agentId)?.destroy();
+    // У CEO над головой подпись статуса: реплика выше неё.
+    const bubble = this.add.text(0, agentId === 'ceo' ? -62 : -22, text, {
+      fontFamily: 'monospace', fontSize: '10px', color: '#20252b',
+      backgroundColor: '#fbfaf3', padding: { x: 6, y: 4 }
+    }).setOrigin(0.5, 1);
+    person.container.add(bubble);
+    this.bubbles.set(agentId, bubble);
+    this.time.delayedCall(ms, () => {
+      if (this.bubbles.get(agentId) === bubble) this.bubbles.delete(agentId);
+      if (bubble.active) bubble.destroy();
+    });
+  }
+
+  private drawInbox() {
+    const ceo = this.ceoDesk;
+    if (!this.inbox || !ceo) return;
+    const g = this.inbox;
+    g.clear();
+    const sheets = Math.min(this.inboxCount, 6);
+    for (let i = 0; i < sheets; i++) {
+      g.fillStyle(0x7d7a70, 1); g.fillRect(ceo.x + 48, ceo.y + 1 - i * 3, 20, 14);
+      g.fillStyle(i === sheets - 1 ? 0xf7f5ec : 0xe4e0d4, 1); g.fillRect(ceo.x + 49, ceo.y + 2 - i * 3, 18, 12);
+    }
+  }
+
+  /** Пауза. Отклоняется (STALE), если за это время началась новая задача. */
+  private wait(ms: number) {
+    const epoch = this.epoch;
+    return new Promise<void>((resolve, reject) => {
+      this.time.delayedCall(ms, () => epoch === this.epoch ? resolve() : reject(STALE));
+    });
   }
 }
