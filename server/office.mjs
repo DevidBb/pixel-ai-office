@@ -83,7 +83,8 @@ const fragmentAfter = (goal, end) => goal.slice(end).replace(POLITE_INSERT, ' ')
 // - фрагмент внутри кавычек;
 // - раньше в том же предложении назван Luma 2–6 («Luma 5, напиши приглашение и позови всю команду» — команда бизнеса).
 const FRAGMENT_DELIMITERS = new RegExp(FRAGMENT_SPLIT.source, 'giu');
-const LABEL = /^\s*(?:[\p{L}-]+\s*){1,2}$/u;
+// Одно-два слова. Слова разделены пробелом: «(?:[\p{L}-]+\s*){1,2}» перебирал разбиения длинного слова надвое.
+const LABEL = /^\s*[\p{L}-]+(?:\s+[\p{L}-]+)?\s*$/u;
 // «Текст: …», «Черновик: …» — дальше материал для обработки, а не поручение.
 const CONTENT_LABEL = /(?<!\p{L})(?:текст|черновик|фраз|цитат|пример|сообщени|письм|пост|перевод|оригинал)\p{L}*/iu;
 // Задача адресована сотруднику по роли: «Менеджер продаж — напиши приглашение и позови всю команду».
@@ -93,7 +94,9 @@ const SENTENCE_START = /[.!?\n](?=[^.!?\n]*$)/u;
 const ADDRESSED_AGENT = /(?<![\p{L}\d])(?:luma|люма)\s*[-#№]?\s*[2-6](?!\d)/iu;
 function notForOffice(goal, start) {
   // Перенос строки после двоеточия не начинает новое предложение: «Переведи на английский:\n<текст>».
-  const head = goal.slice(0, start).replace(POLITE_INSERT, ' ').replace(/:[^\S\n]*\n\s*/gu, ': ');
+  // После «…:» и переноса строки до пустой строки идёт материал: «Переведи на английский:\nПривет,\nПодключи…».
+  const head = goal.slice(0, start).replace(POLITE_INSERT, ' ')
+    .replace(/:[^\S\n]*\n[\s\S]*$/u, material => material.replace(/\n(?![^\S\n]*\n)/gu, ' '));
   const count = pattern => (head.match(pattern) || []).length;
   if (count(/«/g) > count(/»/g) || count(/["“”]/g) % 2 === 1) return true;
   const sentence = head.slice(head.search(SENTENCE_START) + 1);
@@ -124,7 +127,8 @@ const EMPTY_OR_EXCEPTION = /^\s*(?:(?:кроме|за\s+исключением|�
 const FRAGMENT_NEGATION = /(?<!\p{L})(?:не|ни|нет|хватит|незачем|необязательно|вместо|чтобы)(?!\p{L})/iu;
 // «Подключи всю команду? Нет, только Luma 4», «Подключи всю команду — не надо, …»: следующий фрагмент отменяет просьбу.
 // «Подключи всю команду: не надо экономить» — отказ не от команды.
-const REFUSAL_NEXT = /^\s*[?!.;:—–-]\s*(?:нет|не\s+(?:надо|нужно|стоит))\s*(?:[,.!;—–-]|$)/iu;
+// «не надо, чтобы Luma 4 работал один» — не про команду.
+const REFUSAL_NEXT = /^\s*[?!.,;:—–-]+\s*(?:нет|не\s+(?:надо|нужно|стоит))\s*(?:[,.!?;:—–-](?!\s*чтобы)|$)/iu;
 // «Не забудь подключить всю команду», «Не стесняйся позвать всю команду» — по смыслу не отказ.
 const NOT_A_REFUSAL = /(?<!\p{L})не\s+(?:забудь|забудьте|забывай|забывайте|стесняйся|стесняйтесь)(?!\p{L})/giu;
 
@@ -304,9 +308,10 @@ export function wantsWholeTeam(goal) {
     // Отказ после слова — только когда «все/всех» начинает фрагмент: «Исключать всех специалистов не стоит» — просьба.
     // «Все специалисты, не используйте …» — обращение к агентам (именительный и приказ), а не отказ от них.
     const addressed = form === 'все' && ADDRESS_TO_ALL.test(after);
-    const refusedBefore = REFUSAL_BEFORE.test(before) && NOTHING_AFTER_REFUSAL.test(after) &&
-      !CONTRAST_TO_ALL.test(goal.slice(match.index + match[0].length).replace(POLITE_INSERT, ' ').slice(after.length));
-    return !refusedBefore && !(!before.trim() && !addressed && REFUSAL_AFTER.test(after));
+    // «…, а весь офис подключи» после отказа — снова просьба обо всех, где бы ни стоял отказ.
+    const contrast = CONTRAST_TO_ALL.test(goal.slice(match.index + match[0].length).replace(POLITE_INSERT, ' ').slice(after.length));
+    const refusedBefore = REFUSAL_BEFORE.test(before) && NOTHING_AFTER_REFUSAL.test(after) && !contrast;
+    return !refusedBefore && !(!before.trim() && !addressed && !contrast && REFUSAL_AFTER.test(after));
   }));
 }
 

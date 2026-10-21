@@ -581,3 +581,18 @@ test('разбор длинной строки пробелов и повтор�
     assert.ok(performance.now() - started < 1000, `${Math.round(performance.now() - started)} мс`);
   }
 });
+
+test('Codex, 8-й круг: пунктуация перед отказом, «не надо, чтобы», многострочный перевод, противопоставление после отказа', () => {
+  for (const goal of ['Подключи всю команду, нет, только Luma 4 — слоган', 'Подключи всю команду?! Нет, только Luma 4 — слоган', 'Подключи всю команду? Нет: только Luma 4 — слоган']) {
+    assert.deepEqual(routeByRules(goal).agentIds, ['creator'], goal);
+  }
+  assert.equal(wantsWholeTeam('Подключи всю команду. Не надо, чтобы Luma 4 работал один: придумай слоган'), true);
+  assert.equal(wantsWholeTeam('Подключи всю команду, нет времени объяснять'), true, '«нет времени» — не отказ');
+  assert.deepEqual(routeByRules('Luma 4, переведи на английский:\nПривет,\nПодключи всю команду.').agentIds, ['creator']);
+  assert.equal(wantsWholeTeam('Переведи на английский:\nПривет.\n\nПодключи всю команду: придумай слоган.'), true, 'после пустой строки — снова поручение офису');
+  assert.deepEqual(routeByRules('Всех специалистов не подключай, а весь офис подключи: придумайте слоган').agentIds, ALL);
+  const started = performance.now();
+  wantsWholeTeam('я'.repeat(3800) + '0: ' + 'подключи всю команду, '.repeat(50));
+  assert.ok(performance.now() - started < 1000, `${Math.round(performance.now() - started)} мс`);
+});
+
