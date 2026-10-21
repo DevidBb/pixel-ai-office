@@ -69,7 +69,8 @@ export class RunStore {
     return [...this.runs.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, limit)
-      .map(({ id, goal, status, createdAt, updatedAt, events }) => ({ id, goal, status, createdAt, updatedAt, events: events.length }));
+      // lastSeq — номер последнего события: после перезапуска сервера черновики не хранятся, и событий меньше этого номера.
+      .map(({ id, goal, status, createdAt, updatedAt, events }) => ({ id, goal, status, createdAt, updatedAt, events: events.length, lastSeq: events.at(-1)?.seq ?? 0 }));
   }
 
   push(run, type, payload = {}) {

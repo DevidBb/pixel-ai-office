@@ -275,6 +275,27 @@ test('итог (final) сразу пишется на диск: перезапу
   } finally { rmSync(dataDir, { recursive: true, force: true }); }
 });
 
+test('после перезапуска номера событий только растут, список задач отдаёт номер последнего события', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
+  try {
+    const store = new RunStore({ dataDir });
+    const run = store.create(COFFEE_GOAL);
+    store.emit(run, 'agent-delta', { agentId: 'research', subtaskId: 'task-research', text: 'гру' });
+    store.emit(run, 'agent-delta', { agentId: 'research', subtaskId: 'task-research', text: 'ппы' });
+    store.emit(run, 'agent-result', { agentId: 'research', subtaskId: 'task-research', result: 'группы' });
+    const lastBefore = run.events.at(-1).seq;
+    assert.equal(store.list()[0].lastSeq, lastBefore);
+    store.persistNow(run);
+    const loaded = new RunStore({ dataDir }).get(run.id);
+    // Черновики готового ответа на диск не пишутся: событий меньше, чем номер последнего.
+    assert.ok(loaded.events.length < lastBefore);
+    const seqs = loaded.events.map(e => e.seq);
+    assert.equal(new Set(seqs).size, seqs.length, 'номера не повторяются');
+    assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b), 'и идут по возрастанию');
+    assert.ok(loaded.events.at(-1).seq > lastBefore, 'пометка о прерывании получает новый номер');
+  } finally { rmSync(dataDir, { recursive: true, force: true }); }
+});
+
 test('хранятся только последние N задач, повреждённый файл не ломает запуск', () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'pixel-office-'));
   try {

@@ -133,11 +133,49 @@
   .prompt-meta { align-items: flex-start; }
 }
 
-.task-actions { display: flex; gap: 6px; margin: 6px 0 2px; }
+.task-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 2px; }
 .task-actions button { font: inherit; font-size: .72rem; padding: 3px 9px; border-radius: 6px; border: 1px solid rgba(80, 88, 91, .35); background: transparent; color: inherit; cursor: pointer; }
 .task-actions button:hover:not(:disabled) { background: rgba(132, 142, 130, .14); }
 .task-actions button:disabled { opacity: .45; cursor: default; }
 .task-actions button:focus-visible { outline: 2px solid #5b8fa8; outline-offset: 1px; }
+.task-actions .export-note { flex-basis: 100%; font-size: .72rem; color: #9a5b2c; }
 
 .scene-frame { position: relative; }
 .scene-placeholder { position: absolute; inset: 10px; display: grid; place-items: center; padding: 16px; text-align: center; border-radius: 4px; background: #c9c6ba; color: #4c4f4a; font: 12px 'DM Mono', monospace; }
+
+/* Уведомление под сценой: CEO объявил итоговый отчёт. */
+.report-ready {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0 10px 2px;
+  padding: 10px 12px;
+  border: 1px solid rgba(91, 143, 168, .45);
+  border-radius: 9px;
+  background: rgba(91, 143, 168, .12);
+}
+.report-ready-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #5b8fa8;
+  color: white;
+  font-weight: 750;
+}
+.report-ready-copy { min-width: 0; flex: 1; }
+.report-ready-copy strong, .report-ready-copy small { display: block; }
+.report-ready-copy strong { font-size: .8rem; }
+.report-ready-copy small { margin-top: 2px; font-size: .72rem; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.report-ready button { font: inherit; color: inherit; cursor: pointer; border-radius: 7px; }
+.report-ready .report-ready-open { flex: 0 0 auto; padding: 6px 11px; font-size: .74rem; border: 1px solid rgba(91, 143, 168, .6); background: rgba(91, 143, 168, .25); }
+.report-ready .report-ready-open:hover { background: rgba(91, 143, 168, .4); }
+.report-ready .report-ready-close { flex: 0 0 auto; padding: 2px 8px; font-size: 1rem; line-height: 1; border: 0; background: transparent; opacity: .65; }
+.report-ready .report-ready-close:hover { opacity: 1; }
+.report-ready button:focus-visible { outline: 2px solid #5b8fa8; outline-offset: 1px; }
+@media (max-width: 560px) {
+  .report-ready { flex-wrap: wrap; }
+  .report-ready .report-ready-open { order: 3; width: 100%; }
+}
