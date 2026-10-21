@@ -286,7 +286,9 @@ export function parseAssignments(goal) {
   }
   context += goal.slice(cursor);
   context = context
-    .replace(/\s*[:;,](?:[\s;,]*[;,])*\s*(?=\.|$)/g, '')
+    // Хвост из разделителей перед точкой или концом. Без вложенного повтора «(?:[\s;,]*[;,])*»: на «;;;…;о»
+    // он перебирал все разбиения серии (27 знаков — секунды, 40 — часы) и вешал сервер.
+    .replace(/\s*[:;,][\s;,]*(?=\.|$)/g, '')
     .replace(/(?:\s*[;,]\s*){2,}/g, '; ').replace(/\s+([.;,])/g, '$1').replace(/\s{2,}/g, ' ').trim();
   for (const agentId of excluded) uncertain.delete(agentId);
   return { assignments: Object.fromEntries(assignments), excluded: [...excluded], uncertain: [...uncertain], context };
