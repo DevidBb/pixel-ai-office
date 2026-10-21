@@ -48,6 +48,33 @@ export type OfficeSubtask = {
   foreign?: string[];
   /** Сотрудники, чьи результаты агент получил как входные данные (HANDOFF). */
   handoffFrom?: string[];
+  /** Версия ответа: 1 — первый, 2 — исправленный по замечанию (REVISION). */
+  version?: number;
+  /** Ответ до исправления. */
+  previousResult?: string;
+  /** Кто сделал замечание, по которому ответ исправлен. */
+  revisedBy?: string;
+};
+
+/** Замечание, прошедшее проверку сервера: адресат, дефект, цитата из ответа и основание. */
+export type RevisionRemark = {
+  from: string;
+  to: string;
+  defect: string;
+  quote: string;
+  basis: { source: string; quote: string };
+  version: number;
+};
+
+/** Проверка одного замечания (REVISION): идёт, исправление применено или всё оставлено как было. */
+export type OfficeRevision = {
+  status: 'checking' | 'applied' | 'kept';
+  remark?: RevisionRemark;
+  /** kept: none | invalid | unclear | rejected | unchecked | stale | failed. */
+  outcome?: string;
+  reason?: string;
+  /** Объяснение автора ответа. */
+  reply?: string;
 };
 
 /** Реплика сотрудника коллеге (CROSS_TALK) — не результат и не часть итога. */
@@ -71,6 +98,9 @@ export type OfficeTask = {
   /** Реплики команды после работы (событие agent-chat). */
   chat?: OfficeChat[];
   result?: string;
+  /** Итоговый отчёт до исправления по замечанию. */
+  previousResult?: string;
+  revision?: OfficeRevision;
   /** Номер задачи на сервере (/api/runs/:id) — по нему страница переподключается после перезагрузки. */
   runId?: string;
   /** Время запуска (ISO) — для сортировки истории. */
@@ -101,6 +131,14 @@ export type RunEvent = {
   /** agent-chat: кому адресована реплика. */
   to?: string;
   handoffFrom?: string[];
+  /** revision-remark, revision: замечание; revision: новый ответ (result) и новый отчёт (final) вместе. */
+  remark?: RevisionRemark;
+  reply?: string;
+  outcome?: string;
+  reason?: string;
+  fromVersion?: number;
+  version?: number;
+  final?: string;
 };
 
 /** Задача из GET /api/runs/:id. */

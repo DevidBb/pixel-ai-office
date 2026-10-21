@@ -65,6 +65,13 @@ export function readConfig(env = process.env) {
     // Короткий раунд реплик коллегам после работы. По умолчанию выключен: +1 вызов модели на сотрудника.
     crossTalk: envBool(env, 'CROSS_TALK', false),
     crossTalkMaxTokens: envInt(env, 'CROSS_TALK_MAX_TOKENS', 80, 20),
+    // Экспериментально: после итога (и обсуждения) — одно замечание и максимум одно исправление ответа сотрудника.
+    // До 3 вызовов модели: выбор замечания, ответ автора, новая сводка (только если сводку писала модель).
+    revision: envBool(env, 'REVISION', false),
+    // Вся дополнительная стадия: по истечении она прерывается, готовый отчёт остаётся.
+    revisionTimeoutMs: envInt(env, 'REVISION_TIMEOUT_MS', 300_000, 5_000),
+    // Лимит ответа проверяющего (JSON с замечанием). Ответ автора ограничен лимитом его задания, сводка — CEO_SUMMARY_MAX_TOKENS.
+    revisionPickMaxTokens: envInt(env, 'REVISION_PICK_MAX_TOKENS', 250, 50),
     maxAgents: Math.min(envInt(env, 'MAX_AGENTS', 5, 1), 5),
     ollamaThink: envBool(env, 'OLLAMA_THINK', false),
     ollamaNumCtx: envInt(env, 'OLLAMA_NUM_CTX', 4096, 512),

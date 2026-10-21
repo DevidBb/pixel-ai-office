@@ -490,7 +490,9 @@ export function attributionBlock(plan, outcomes) {
     const outcome = outcomes.find(o => o.agentId === task.agentId);
     const what = task.assigned ? ` — «${clip(task.objective, 80)}»` : '';
     const used = outcome?.handoffFrom?.length ? ` (с данными от ${names(outcome.handoffFrom)})` : '';
-    if (outcome?.result) return `- ✅ ${agentLabel(task.agentId)}${what}: результат получен${used}`;
+    // Исправление по замечанию (REVISION) — тоже по фактам: автор сам принял замечание, сервер проверил ответ.
+    const revised = outcome?.revisedBy ? ` (исправлен по замечанию ${agentLabel(outcome.revisedBy).split(' · ')[0]})` : '';
+    if (outcome?.result) return `- ✅ ${agentLabel(task.agentId)}${what}: результат получен${used}${revised}`;
     return `- ❌ ${agentLabel(task.agentId)}${what}: не выполнено${outcome?.error ? ` (${outcome.error})` : ''}`;
   });
   return `## Кто выполнил задачу\n${lines.join('\n')}`;
@@ -659,6 +661,9 @@ export function handoffDigest(text) {
   const rows = [];
   let section;
   let next;
+  // Раздел или оговорка «ниже» ещё без своих пунктов: пустая строка сразу после них их не закрывает
+  // («Допущение: цены ниже — гипотезы.\n\n- Капучино — 3 €» — цена всё равно гипотеза).
+  let fresh = false;
   for (const raw of stripThink(text).split(/\r?\n/)) {
     // «### Клиенты», «**Напитки**» — заголовки разделов (жирная строка с цитатой или точкой в конце — нет).
     const bold = raw.match(/^\s*(\*\*|__)([^*_«"“\n]+?)\1\s*:?\s*$/u);
@@ -666,7 +671,7 @@ export function handoffDigest(text) {
     const line = raw.replace(/^\s*(?:(?:[-*•–]|\d+[.)])\s+)?/u, '').replace(/[*_#`]+/g, '').trim();
     if (!/[\p{L}\d]/u.test(line)) {
       // Пустая строка или линия «---» после пунктов закрывает раздел и оговорку «ниже».
-      if (rows.at(-1)?.item) section = next = undefined;
+      if (rows.at(-1)?.item && !fresh) section = next = undefined;
       continue;
     }
     const label = line.match(STATUS_LABEL);
@@ -676,21 +681,28 @@ export function handoffDigest(text) {
       // Заголовок раздела: «Гипотезы:» задаёт статус пунктов, «Напитки:» — сбрасывает.
       section = labelled || statusOf(content);
       next = undefined;
+      fresh = true;
       if (content) rows.push({ header: content.replace(/:$/u, '') });
       continue;
     }
     const about = label ? (ABOUT_NEXT.test(content) ? 'next' : ABOUT_PREVIOUS.test(content) ? 'previous' : '') : '';
     const before = rows.filter(r => r.item && !r.own && !r.closed);
-    if (about === 'previous' && before.length) {
+    // Оговорка о следующих строках (или о предыдущих, когда их нет) открывает статус для пунктов ниже.
+    const opens = Boolean(about) && !(about === 'previous' && before.length);
+    if (about && !opens) {
       for (const r of before) r.status = cautious(r.status, labelled);
-    } else if (about) {
+    } else if (opens) {
       next = labelled;
     }
     if (about) {
       for (const r of rows) r.closed = true;
       // Оговорка — о других строках; своё содержание передаётся, только если в нём есть цифры или условия.
-      if (!DIGEST_KEEP.test(content)) continue;
+      if (!DIGEST_KEEP.test(content)) {
+        if (opens) fresh = true;
+        continue;
+      }
     }
+    fresh = opens;
     // Своя пометка и раздел («Факты:») сильнее общей оговорки, но осторожное слово в тексте сильнее пометки:
     // «Факт: возможно 30 гостей» — гипотеза.
     const inline = statusOf(content);
@@ -780,6 +792,8 @@ const LEADING_ADDRESS = /^(?:luma|люма)\s*[1-6](?!\d)/iu;
 
 // Вопрос или возражение: на них хватает одного своего слова («Почему?», «А утром?», «Но не вечером»).
 const ASK_OR_OBJECT = /\?|(?<!\p{L})(?:но|однако|а\s+не|нет|лучше|вместо)(?!\p{L})/iu;
+// Расчёт («30 × 3 € = 90 €, а не 120 €») — содержание, даже если букв в реплике почти нет.
+const CALCULATION = /\d\s*(?:€|%|₽|\$)?\s*[×x*·/+=]\s*\d/u;
 
 // Своё после цитаты: новое число, вопрос или возражение хотя бы из одного своего слова, утверждение — из двух.
 function addsToQuote(reply, sources) {
@@ -816,7 +830,7 @@ export function cleanChatReply(text, speakerId, participantIds = [], { truncated
   if (truncated && picked.length === 2 && !/[.!?…]["'»”“’)\]]*$/u.test(picked[1].trim())) picked.pop();
   reply = clip(picked.join('').replaceAll(DECIMAL_DOT, '.').trim(), 280);
   const bare = reply.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim().replace(LEADING_ADDRESS, '').trim();
-  if (!bare || STUB_REPLY.test(bare) || (bare.match(/\p{L}/gu) || []).length < 8) return null;
+  if (!bare || STUB_REPLY.test(bare) || ((bare.match(/\p{L}/gu) || []).length < 8 && !CALCULATION.test(reply))) return null;
   // Пересказ результата коллеги (sources — их результаты и сказанные реплики) — не реплика: в чате ничего нового.
   // Цитата перед своим вопросом, возражением или исправлением — реплика: важно, что осталось кроме цитаты.
   if (sources.length && echo(reply, sources).share >= ECHO_LINE_SHARE && !addsToQuote(reply, sources)) return null;
@@ -826,4 +840,159 @@ export function cleanChatReply(text, speakerId, participantIds = [], { truncated
     if (agent.id !== speakerId && participantIds.includes(agent.id)) { to = agent.id; break; }
   }
   return { text: reply, ...(to ? { to } : {}) };
+}
+
+// --- Одно исправление по замечанию (REVISION, экспериментально) --------------------------------
+// После итога (и обсуждения) — не больше трёх вызовов модели: выбор замечания, ответ автора, новая сводка.
+// Слова «ошибка»/«исправь» ничего не решают. Замечание называет адресата, дефект, точную цитату из его текущего
+// ответа и основание — точную цитату из задания или ответа коллеги; сервер проверяет каждую часть.
+// Решает автор ответа: мнение проверяющего — не факт. Исправление сервер тоже проверяет (validateRevision).
+export const REVISION_RESULT_CHARS = 700;
+const REVISION_QUOTE_CHARS = 300;
+
+/** Текст для сравнения цитат: регистр, «ё», маркеры списка, разметка, вид кавычек и тире, «×», пробелы не важны. */
+function normalizeText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replaceAll('ё', 'е')
+    .replace(/^[ \t]*(?:[-*•–]|\d+[.)])[ \t]+/gmu, '')
+    .replace(/(\d)\s*[×xх*·]\s*(?=\d)/gu, '$1×')
+    .replace(/[*_`#]+/g, '')
+    .replace(/[«»“”„"]/gu, '"')
+    .replace(/[—–−]/gu, '-')
+    .replace(/\s+/gu, ' ')
+    .replace(/(\d) (?=\d{3}(?!\d))/g, '$1')
+    .trim();
+}
+
+function quoteKey(quote) {
+  return normalizeText(quote).replace(/^["'\s.,;:!?…-]+|["'\s.,;:!?…]+$/gu, '');
+}
+
+/** Цитата пригодна для проверки: не пустая, не одна цифра или знак, не целый ответ. */
+function usableQuote(quote) {
+  return quote.length <= REVISION_QUOTE_CHARS && /[\p{L}\d]{2,}/u.test(quoteKey(quote));
+}
+
+export function containsQuote(text, quote) {
+  const key = quoteKey(quote);
+  return key.length >= 2 && normalizeText(text).includes(key);
+}
+
+// Модель может назвать сотрудника по id («finance») или по имени («Luma 6»).
+function agentRef(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (text === CEO.id || AGENTS.some(a => a.id === text)) return text;
+  const number = text.match(/(?:luma|люма)\s*[#№]?\s*([1-6])(?!\d)/u)?.[1];
+  return number ? agentByNumber(number).id : '';
+}
+
+const GOAL_SOURCE = /^(?:goal|task|user|задани\p{L}*|задач\p{L}*|цел\p{L}*|пользовател\p{L}*)$/iu;
+
+/** Подсказка для выбора одного замечания: задание, сжатые ответы с id сотрудников и (если было) обсуждение. */
+export function revisionPickMessages(goal, results, chat = []) {
+  const answers = results.map(r => `[${r.agentId}] ${agentLabel(r.agentId)}:\n${clipLines(stripThink(r.result), REVISION_RESULT_CHARS)}`).join('\n\n');
+  const talk = chat.length ? `\n\nОБСУЖДЕНИЕ КОМАНДЫ:\n${chat.map(m => `[${m.agentId}]${m.to ? ` → [${m.to}]` : ''}: ${m.text}`).join('\n')}` : '';
+  const ids = results.map(r => r.agentId).join(', ');
+  return [
+    { role: 'system', content: 'Ты проверяющий в Pixel AI Office. Ищешь в ответах сотрудников одну конкретную ошибку, которую можно доказать точной цитатой из задания пользователя или из ответа другого сотрудника. Мнение, вкус и «можно лучше» — не ошибка. Отвечаешь только JSON.' },
+    { role: 'user', content: `ЗАДАНИЕ ПОЛЬЗОВАТЕЛЯ:\n${goal}\n\nОТВЕТЫ СОТРУДНИКОВ:\n${answers}${talk}\n\nЕсли ошибки нет или её нельзя доказать точной цитатой — ответ {"none":true}.\nИначе ответ:\n{"from":"кто заметил: id из обсуждения или ceo","to":"id сотрудника с ошибкой (${ids})","defect":"что именно неверно, одним предложением","quote":"точная цитата с ошибкой из ответа этого сотрудника","basis_source":"goal или id другого сотрудника","basis_quote":"точная цитата из задания или ответа коллеги, которая доказывает ошибку"}` }
+  ];
+}
+
+/**
+ * Проверка замечания сервером: структура, существование адресата и источника, цитаты, версия ответа.
+ * results — [{ agentId, result }] текущие ответы; versions — agentId → номер версии ответа.
+ * Возвращает { none: true }, { reason } (замечание не принято) или { remark }.
+ */
+export function validateRemark(parsed, { goal, results, versions = {} }) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { reason: 'ответ проверяющего — не JSON-объект' };
+  const text = value => (typeof value === 'string' ? value.trim() : '');
+  const shown = value => clip(String(value ?? '').trim(), 40);
+  if (parsed.none === true || text(parsed.none).toLowerCase() === 'true' || (!parsed.to && !parsed.defect && !parsed.quote)) return { none: true };
+  const to = agentRef(parsed.to);
+  const target = results.find(r => r.agentId === to && r.result);
+  if (!target) return { reason: `адресат «${shown(parsed.to)}» не сдавал результат в этой задаче` };
+  // «Кто заметил» — только подпись: незнакомое имя или сам адресат — значит, заметил проверяющий (CEO).
+  let from = agentRef(parsed.from);
+  if (!from || from === to || (from !== CEO.id && !results.some(r => r.agentId === from))) from = CEO.id;
+  const defect = text(parsed.defect);
+  if ((defect.match(/\p{L}/gu) || []).length < 8) return { reason: 'не описано, что именно неверно' };
+  const quote = text(parsed.quote);
+  if (!usableQuote(quote) || !containsQuote(target.result, quote)) {
+    return { reason: `цитаты «${clip(quote, 60)}» нет в текущем ответе ${agentLabel(to)}` };
+  }
+  const basis = parsed.basis && typeof parsed.basis === 'object' ? parsed.basis : {};
+  const basisQuote = text(basis.quote ?? parsed.basis_quote);
+  if (!usableQuote(basisQuote)) return { reason: 'нет цитаты-основания из задания или ответа коллеги' };
+  // Основание — только задание или ответ другого сотрудника, а не ответ самого адресата.
+  const named = text(basis.source ?? parsed.basis_source);
+  const sources = [['goal', goal], ...results.filter(r => r.agentId !== to && r.result).map(r => [r.agentId, r.result])];
+  const wanted = named ? (GOAL_SOURCE.test(named) ? 'goal' : agentRef(named)) : '';
+  const candidates = named ? sources.filter(([id]) => id === wanted) : sources;
+  if (!candidates.length) return { reason: `источник основания «${shown(named)}» — не задание и не ответ коллеги` };
+  const source = candidates.find(([, body]) => containsQuote(body, basisQuote))?.[0];
+  if (!source) return { reason: `основания «${clip(basisQuote, 60)}» нет ${named ? 'в указанном источнике' : 'ни в задании, ни в ответах коллег'}` };
+  return { remark: { from, to, defect: clip(defect, 300), quote, basis: { source, quote: basisQuote }, version: versions[to] ?? 1 } };
+}
+
+/** Подсказка автору: его задание, текущий ответ и замечание с основанием. Решение — за автором. */
+export function revisionMessages(agent, task, plan, current, remark) {
+  const [system, original] = agentMessages(agent, task, plan);
+  const from = agentLabel(remark.from);
+  const basis = remark.basis.source === 'goal' ? 'задание пользователя' : `ответ ${agentLabel(remark.basis.source)}`;
+  return [system, {
+    role: 'user',
+    content: `${original.content}\n\nТВОЙ ТЕКУЩИЙ ОТВЕТ:\n${stripThink(current)}\n\nЗАМЕЧАНИЕ (${from}):\n- что неверно: ${remark.defect}\n- в твоём ответе: «${remark.quote}»\n- основание, ${basis}: «${remark.basis.quote}»\n\n` +
+      'Коллега может ошибаться. Сам проверь замечание по заданию и данным выше. Если оно верно — исправь только эту ошибку, остальное оставь как было. Если неверно — ответ не меняй.\n' +
+      'Ответь строго в формате:\nРЕШЕНИЕ: исправляю или отклоняю\nПРИЧИНА: одно предложение\nОТВЕТ:\nполный исправленный ответ (только если исправляешь)'
+  }];
+}
+
+// «РЕШЕНИЕ: исправляю», «**РЕШЕНИЕ**: отклоняю», «РЕШЕНИЕ — не исправляю».
+const DECISION = /РЕШЕНИЕ[\s*_:：—–-]*[«"“]?\s*(не\s+исправ|исправ|отклон)/iu;
+const ANSWER = /(?:^|\n)[\s*_#]*(?:ИСПРАВЛЕННЫЙ\s+)?ОТВЕТ[\s*_]*:[*_]*[ \t]*\n?([\s\S]*)$/iu;
+
+/** Ответ автора: { verdict: 'accept' | 'reject' | null, reason, result }. Без ясного «РЕШЕНИЕ» — null (ответ не меняется). */
+export function parseAuthorReply(text) {
+  const clean = stripThink(text).replace(/\r\n?/g, '\n');
+  const decision = clean.match(DECISION)?.[1]?.toLowerCase();
+  const verdict = !decision ? null : decision.startsWith('исправ') ? 'accept' : 'reject';
+  const reason = (clean.match(/ПРИЧИНА[\s*_]*[:：—–-]\s*([^\n]*)/iu)?.[1] || '').replace(/[*_]+/g, '').trim();
+  let result = clean.match(ANSWER)?.[1]?.trim() || '';
+  if (!result && verdict === 'accept') {
+    // «ОТВЕТ:» забыт — исправленный ответ идёт после строк решения и причины.
+    const lines = clean.split('\n');
+    result = lines.slice(lines.findLastIndex(line => /РЕШЕНИЕ|ПРИЧИНА/iu.test(line)) + 1).join('\n').trim();
+  }
+  return { verdict, reason: clip(reason, 300), result };
+}
+
+function hasNumber(text, value) {
+  const flat = String(text || '').replace(/(\d)[   ](?=\d{3}(?!\d))/g, '$1');
+  const [whole, fraction] = value.split(',');
+  const pattern = fraction ? `${whole}[.,]${fraction}` : `${whole}(?:[.,]0+)?`;
+  return new RegExp(`(?<![\\d.,])${pattern}(?![.,]?\\d)`, 'u').test(flat);
+}
+
+/** Точное значение калькулятора офиса, которое было в ответе и пропало после исправления («30 × 3 = 90»), или null. */
+export function calculatorLoss(objective, before, after) {
+  return arithmeticHints(objective).find(hint => {
+    const value = hint.split(' = ').at(-1);
+    return hasNumber(before, value) && !hasNumber(after, value);
+  }) ?? null;
+}
+
+/**
+ * Можно ли применить исправление автора. Возвращает причину отказа или null.
+ * Сервер не судит, прав ли проверяющий, но не применяет пустое, обрезанное, неизменное исправление,
+ * исправление, где осталась процитированная ошибка, и исправление, теряющее точный расчёт калькулятора.
+ */
+export function validateRevision(task, current, reply, remark, { truncated = false } = {}) {
+  if (!reply.result) return 'автор согласился, но не прислал исправленный ответ';
+  if (truncated) return 'исправленный ответ обрезан лимитом токенов';
+  if (normalizeText(reply.result) === normalizeText(current)) return 'исправленный ответ не отличается от прежнего';
+  if (containsQuote(reply.result, remark.quote)) return 'в исправленном ответе осталась процитированная ошибка';
+  const lost = calculatorLoss(task.objective, current, reply.result);
+  return lost ? `исправление убирает точный расчёт калькулятора офиса (${lost})` : null;
 }

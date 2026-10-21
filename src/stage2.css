@@ -104,6 +104,17 @@
 .chat-line strong { font-weight: 650; color: #389267; }
 .chat-line span { overflow-wrap: anywhere; }
 .agent-result .result-warning { margin: 6px 0 0; font-size: .75rem; color: #9a5b2c; }
+.agent-result .result-revised { margin: 6px 0 0; font-size: .75rem; color: #2f6f8f; }
+.previous-result { margin-top: 8px; }
+.previous-result summary { cursor: pointer; font-size: .74rem; opacity: .72; }
+.previous-result pre { opacity: .72; }
+.final-result .previous-result { margin: 0 13px 13px; }
+.revision-box { margin-top: 13px; padding: 10px 13px; border-left: 3px solid rgba(91, 143, 168, .55); border-radius: 0 9px 9px 0; background: rgba(91, 143, 168, .06); font-size: .78rem; line-height: 1.5; }
+.revision-box h3 { margin: 0 0 6px; font-size: .77rem; text-transform: uppercase; letter-spacing: .08em; opacity: .7; }
+.revision-box p { margin: 4px 0 0; overflow-wrap: anywhere; }
+.revision-box .revision-quote { opacity: .78; }
+.revision-box .revision-outcome { font-weight: 600; }
+.revision-box.applied .revision-outcome { color: #389267; }
 .agent-result pre, .final-result pre {
   margin: 8px 0 0;
   white-space: pre-wrap;

@@ -29,9 +29,13 @@ export class RunStore {
         // До падения клиент мог получить события, которые не успели попасть на диск (запись отложена на persistDelayMs).
         // События восстановления нумеруем с запасом, чтобы переподключение с ?after их не пропустило.
         run.seqFloor = (run.events.at(-1)?.seq || 0) + RESTART_SEQ_GAP;
-        // Перезапуск после готового итога оборвал только обсуждение команды (CROSS_TALK): задача завершена.
+        // Перезапуск после готового итога оборвал только обсуждение команды (CROSS_TALK) или проверку замечания
+        // (REVISION): задача завершена. Исправление записано вместе с новым отчётом одним событием, поэтому
+        // из файла восстанавливается последняя сохранённая согласованная версия — прежняя или исправленная.
         if (!FINISHED.has(run.status) && this.hasFinal(run)) {
-          this.finishAfterFinal(run, 'Обсуждение команды прервано перезапуском сервера. Итоговый отчёт сохранён.');
+          this.finishAfterFinal(run, this.inRevision(run)
+            ? 'Проверка замечания прервана перезапуском сервера. Показана последняя сохранённая согласованная версия отчёта.'
+            : 'Обсуждение команды прервано перезапуском сервера. Итоговый отчёт сохранён.');
         }
         // Сервер перезапустился посреди задачи: модель уже не отвечает ей, честно помечаем как прерванную.
         if (!FINISHED.has(run.status)) {
@@ -82,15 +86,21 @@ export class RunStore {
     return event;
   }
 
-  /** Событие от исполнителя задачи; после завершения или отмены новые события не принимаются. */
+  /**
+   * Событие от исполнителя задачи; после завершения или отмены новые события не принимаются.
+   * Для final и revision возвращает итог записи на диск: true — записано, false — запись не удалась,
+   * undefined — история не хранится на диске.
+   */
   emit(run, type, payload) {
-    if (FINISHED.has(run.status)) return;
+    if (FINISHED.has(run.status)) return undefined;
     this.push(run, type, payload);
     if (type === 'done') this.finish(run, 'done');
     else if (type === 'error') this.finish(run, 'error');
-    // Итог готов, а дальше может идти долгое обсуждение (CROSS_TALK): отчёт сразу на диск, а не через persistDelayMs.
-    else if (type === 'final') this.persistNow(run);
+    // Итог готов, а дальше может идти долгое обсуждение (CROSS_TALK) или проверка замечания (REVISION):
+    // отчёт и исправление (новый ответ вместе с новым отчётом) сразу на диск, а не через persistDelayMs.
+    else if (type === 'final' || type === 'revision') return this.persistNow(run);
     else this.schedulePersist(run);
+    return undefined;
   }
 
   finish(run, status) {
@@ -103,9 +113,12 @@ export class RunStore {
   cancel(run) {
     if (FINISHED.has(run.status)) return false;
     run.controller?.abort(new Error('cancelled by user'));
-    // Итог уже отправлен (final) — остановка обрывает только необязательное обсуждение команды (CROSS_TALK).
+    // Итог уже отправлен (final) — остановка обрывает только необязательное обсуждение команды (CROSS_TALK)
+    // или проверку замечания (REVISION); незаконченное исправление не применяется.
     if (this.hasFinal(run)) {
-      this.finishAfterFinal(run, 'Обсуждение команды остановлено пользователем. Итоговый отчёт сохранён.');
+      this.finishAfterFinal(run, this.inRevision(run)
+        ? 'Проверка замечания остановлена пользователем. Итоговый отчёт сохранён в последней согласованной версии.'
+        : 'Обсуждение команды остановлено пользователем. Итоговый отчёт сохранён.');
       return true;
     }
     this.push(run, 'error', { message: 'Выполнение остановлено пользователем.', cancelled: true });
@@ -118,11 +131,21 @@ export class RunStore {
     return run.events.some(event => event.type === 'final');
   }
 
-  /** Обсуждение после итога оборвалось: отчёт остаётся, задача завершена, кто писал реплику, больше не «думает». */
+  inRevision(run) {
+    return run.events.some(event => event.type === 'revision-start');
+  }
+
+  /**
+   * Обсуждение или проверка замечания после итога оборвались: отчёт остаётся, задача завершена,
+   * кто писал реплику или проверял замечание, больше не «думает», а незаконченная проверка помечена как прерванная.
+   */
   finishAfterFinal(run, message) {
     const lastStatus = new Map(run.events.filter(event => event.type === 'agent-status').map(event => [event.agentId, event.status]));
     for (const [agentId, status] of lastStatus) {
       if (status === 'thinking' || status === 'working') this.push(run, 'agent-status', { agentId, status: 'done', task: 'Подзадача готова' });
+    }
+    if (this.inRevision(run) && !run.events.some(event => event.type === 'revision' || event.type === 'revision-kept')) {
+      this.push(run, 'revision-kept', { outcome: 'failed', reason: 'проверка замечания прервана до исправления' });
     }
     this.push(run, 'log', { agentId: 'ceo', message, kind: 'warning' });
     this.push(run, 'done', {});
@@ -146,8 +169,9 @@ export class RunStore {
     run.timer.unref?.();
   }
 
+  /** Запись задачи на диск целиком (через временный файл). true — записано, false — ошибка, undefined — без диска. */
   persistNow(run) {
-    if (!this.dir) return;
+    if (!this.dir) return undefined;
     if (run.timer) { clearTimeout(run.timer); run.timer = null; }
     const { id, goal, status, createdAt, updatedAt } = run;
     // Черновики (agent-delta) нужны, пока сотрудник пишет; после его agent-result на диск их не пишем —
@@ -159,8 +183,10 @@ export class RunStore {
     try {
       writeFileSync(tmp, JSON.stringify({ id, goal, status, createdAt, updatedAt, events }));
       renameSync(tmp, file);
+      return true;
     } catch (error) {
       diag(`runs: не удалось сохранить ${id}`, { error: error.message });
+      return false;
     }
   }
 

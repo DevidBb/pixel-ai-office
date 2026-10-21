@@ -54,6 +54,23 @@ export function reduceTask(task: OfficeTask, event: RunEvent): OfficeTask {
     case 'chat-start':
       // Итог готов, команда обсуждает результаты (CROSS_TALK): CEO уже ничего не проверяет.
       return { ...task, status: 'discussion' };
+    case 'revision-start':
+      // Проверка одного замечания (REVISION): готовый отчёт уже виден и пока не меняется.
+      return { ...task, status: 'discussion', revision: { status: 'checking' } };
+    case 'revision-remark':
+      return event.remark ? { ...task, revision: { status: 'checking', remark: event.remark } } : task;
+    case 'revision-kept':
+      return { ...task, revision: { ...task.revision, status: 'kept', outcome: event.outcome, reason: event.reason, reply: event.reply } };
+    case 'revision': {
+      // Новый ответ сотрудника и новый отчёт применяются вместе, одним шагом. Повтор события
+      // и исправление к устаревшей версии ответа ничего не меняют.
+      const target = (task.subtasks || []).find(subtask => subtask.id === event.subtaskId);
+      if (!target || !event.result || !event.final || task.revision?.status === 'applied' || (target.version ?? 1) !== event.fromVersion) return task;
+      const revised = updateSubtask(task, target.id, s => ({
+        ...s, result: event.result, previousResult: s.result, version: event.version, revisedBy: event.remark?.from, foreign: event.foreign, stats: event.stats || s.stats
+      }));
+      return { ...revised, result: event.final, previousResult: task.result, revision: { status: 'applied', remark: event.remark, reply: event.reply } };
+    }
     case 'done':
       return { ...task, status: 'done' };
     case 'error': {
@@ -68,7 +85,7 @@ export function reduceTask(task: OfficeTask, event: RunEvent): OfficeTask {
 
 /** Пустая задача, готовая к проигрыванию событий с начала. */
 export function resetTask(task: OfficeTask): OfficeTask {
-  return { ...task, status: 'planning', planSummary: undefined, subtasks: [], logs: [], chat: [], result: undefined };
+  return { ...task, status: 'planning', planSummary: undefined, subtasks: [], logs: [], chat: [], result: undefined, previousResult: undefined, revision: undefined };
 }
 
 /** Задача из истории сервера (data/runs), которой нет в этом браузере. */

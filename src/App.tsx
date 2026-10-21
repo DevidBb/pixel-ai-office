@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { OfficeScene } from './OfficeScene';
-import type { Agent, ModelStats, OfficeLog, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
+import type { Agent, ModelStats, OfficeLog, OfficeRevision, OfficeTask, RunEvent, ServerRun, TaskStatus } from './types';
 import { clockNow, makeLog, mergeHistory, reduceTask, resetTask, taskFromRun } from './taskEvents';
 import './stage2.css';
 
@@ -31,6 +31,26 @@ function formatStats(stats?: ModelStats) {
   if (stats.queueMs && stats.queueMs >= 1000) parts.push(`в очереди ${Math.round(stats.queueMs / 1000)} с`);
   if (stats.doneReason === 'length') parts.push('обрезано лимитом');
   return parts.join(' · ');
+}
+
+const nameOf = (agentId?: string) => initialAgents.find(agent => agent.id === agentId)?.name || agentId || '—';
+
+const keptLabel: Record<string, string> = {
+  none: 'Замечаний с проверяемым основанием нет',
+  invalid: 'Замечание не принято сервером',
+  unclear: 'Автор не ответил ясно',
+  rejected: 'Отклонено автором',
+  unchecked: 'Исправление не прошло проверку',
+  stale: 'Замечание к устаревшей версии',
+  failed: 'Проверка не завершилась'
+};
+
+/** Итог проверки замечания (REVISION) одной строкой. */
+function revisionOutcome(revision: OfficeRevision) {
+  if (revision.status === 'checking') return revision.remark ? `${nameOf(revision.remark.to)} проверяет замечание…` : 'Ищем ошибку, подтверждённую заданием или данными коллеги…';
+  if (revision.status === 'applied') return `Исправлено: ${nameOf(revision.remark?.to)} принял замечание${revision.reply ? ` — ${revision.reply}` : ''}. Ответ и итоговый отчёт обновлены вместе.`;
+  const label = keptLabel[revision.outcome || ''] || 'Без изменений';
+  return `${label}${revision.reason ? `: ${revision.reason}` : ''}. Ответы и отчёт не изменены.`;
 }
 
 function loadSavedTasks(): OfficeTask[] {
@@ -411,8 +431,10 @@ export default function App() {
                       {subtask.result && <div className="agent-result">
                         <strong>Результат {agent?.name || subtask.agentId}{subtask.stats ? <small className="result-stats"> · {formatStats(subtask.stats)}</small> : null}</strong>
                         {(subtask.handoffFrom || []).length > 0 && <p className="result-handoff">↳ Использованы данные от {subtask.handoffFrom!.map(id => agents.find(item => item.id === id)?.name || id).join(', ')}.</p>}
+                        {subtask.previousResult && <p className="result-revised">✎ Версия {subtask.version}: исправлено по замечанию {nameOf(subtask.revisedBy)}{task.revision?.remark ? ` — ${task.revision.remark.defect}` : ''}</p>}
                         {(subtask.foreign || []).length > 0 && <p className="result-warning">⚠ В ответе упомянуты {subtask.foreign!.join(', ')}. Это текст {agent?.name}, а не их результаты.</p>}
                         <pre>{subtask.result}</pre>
+                        {subtask.previousResult && <details className="previous-result"><summary>Исходный ответ (версия {(subtask.version || 2) - 1})</summary><pre>{subtask.previousResult}</pre></details>}
                       </div>}
                     </details>;
                   })}</div>}
@@ -421,7 +443,18 @@ export default function App() {
                     const to = agents.find(item => item.id === line.to);
                     return <div className="chat-line" key={line.id}><time>{line.time}</time><strong>{agent?.name || line.agentId}{to ? ` → ${to.name}` : ''}</strong><span>{line.text}</span></div>;
                   })}</div>}
-                  {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO</summary><pre>{task.result}</pre></details>}
+                  {task.revision && <div className={`revision-box ${task.revision.status}`}>
+                    <h3>Замечание и исправление</h3>
+                    {task.revision.remark && <>
+                      <p><strong>{nameOf(task.revision.remark.from)} → {nameOf(task.revision.remark.to)}:</strong> {task.revision.remark.defect}</p>
+                      <p className="revision-quote">В ответе: «{task.revision.remark.quote}»</p>
+                      <p className="revision-quote">Основание ({task.revision.remark.basis.source === 'goal' ? 'задание' : `ответ ${nameOf(task.revision.remark.basis.source)}`}): «{task.revision.remark.basis.quote}»</p>
+                    </>}
+                    <p className="revision-outcome">{revisionOutcome(task.revision)}</p>
+                  </div>}
+                  {task.result && <details className="final-result" open={task.status === 'error'}><summary>Итоговый отчёт CEO{task.previousResult ? ' · исправленная версия' : ''}</summary><pre>{task.result}</pre>
+                    {task.previousResult && <details className="previous-result"><summary>Отчёт до исправления</summary><pre>{task.previousResult}</pre></details>}
+                  </details>}
                   {(task.logs || []).length > 0 && <details className="collaboration-log"><summary>Журнал действий ({task.logs!.length})</summary><div className="log-entries">{task.logs!.map(log => {
                     const agent = agents.find(item => item.id === log.agentId);
                     return <div className={`log-entry ${log.kind || 'info'}`} key={log.id}><time>{log.time}</time><strong>{agent?.name || log.agentId}</strong><span>{log.message}</span></div>;

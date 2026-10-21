@@ -4,10 +4,12 @@ import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs, chatMessages, chatPartner, cleanChatReply
+  assertSomeoneAllowed, uncertainNote, handoffEnabled, handoffGraph, compactHandoffs, chatMessages, chatPartner, cleanChatReply,
+  revisionPickMessages, validateRemark, revisionMessages, parseAuthorReply, validateRevision
 } from './office.mjs';
 
 const DELTA_INTERVAL_MS = 300;
+const shortName = agentId => agentLabel(agentId).split(' · ')[0];
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, *.local
@@ -144,7 +146,8 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
   async function executeRun(goal, { emit: send, signal, runId }) {
     const runStarted = Date.now();
     const cancelled = () => signal.aborted;
-    const safeEmit = (type, payload) => { if (!cancelled()) send(type, payload); };
+    // Возвращает ответ получателя событий: журнал задачи сообщает, записаны ли итог и исправление на диск.
+    const safeEmit = (type, payload) => (cancelled() ? undefined : send(type, payload));
     diag(`[run ${runId}] новая задача`, { chars: goal.length, concurrency: config.concurrency, router: config.routerMode });
 
     try {
@@ -261,8 +264,12 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
       if (!results.length) throw new Error('Ни один специалист не смог выполнить задачу. Подробности — в журнале и в логах сервера.');
 
       let summary;
+      // Как собран отчёт: single — единственный ответ, combined — ответы сотрудников, model — сводка модели.
+      // Исправление (REVISION) пересобирает отчёт тем же способом.
+      let summaryKind = 'combined';
       if (results.length === 1) {
         summary = results[0].result;
+        summaryKind = 'single';
         safeEmit('log', { agentId: 'ceo', message: 'Результат получен от одного специалиста — итог передан без дополнительной сводки.' });
       } else if (!needsModelSummary(plan, config.ceoSummary)) {
         safeEmit('log', { agentId: 'ceo', message: config.ceoSummary === 'auto'
@@ -278,6 +285,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
           ({ text: summary } = await callModel(summaryMessages(goal, results, failed), {
             maxTokens: config.summaryMaxTokens, signal, label: `${runId}/ceo-summary`
           }));
+          summaryKind = 'model';
         } catch (error) {
           if (cancelled()) return;
           safeEmit('log', { agentId: 'ceo', message: `Сводка CEO не получена (${error.message}). Показаны результаты специалистов.`, kind: 'warning' });
@@ -296,7 +304,12 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         kind: failed.length ? 'warning' : 'success'
       });
       // Реплики — после итога: отчёт не ждёт обсуждения. Отмена прерывает и этот раунд.
-      if (config.crossTalk && results.length > 1) await crossTalk(results, { safeEmit, signal, runId });
+      const chat = config.crossTalk && results.length > 1 ? await crossTalk(results, { safeEmit, signal, runId }) : [];
+      if (cancelled()) return;
+      // Одно исправление по замечанию — после обсуждения, один раз, без новых кругов обсуждения.
+      if (config.revision) {
+        await reviseOnce({ goal, plan, outcomes: outcomes.filter(Boolean), results, failed, summaryKind, chat, safeEmit, signal, runId });
+      }
       if (cancelled()) return;
       diag(`[run ${runId}] завершено за ${Math.round((Date.now() - runStarted) / 1000)} с`, { ok: results.length, failed: failed.length });
       safeEmit('done', {});
@@ -315,7 +328,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
    * Короткий раунд реплик (CROSS_TALK): каждый, кто сдал результат, пишет одному коллеге 1–2 предложения
    * (chatPartner), а если коллега уже написал ему — отвечает. Пересказ чужого результата не показывается.
    * Реплики — отдельные события agent-chat: не результаты, не попадают в «Кто выполнил задачу» и в проверку чужих имён.
-   * Всё состояние — в рамках одного запуска.
+   * Всё состояние — в рамках одного запуска. Возвращает показанные реплики (для REVISION).
    */
   async function crossTalk(results, { safeEmit, signal, runId }) {
     const participants = results.map(r => r.agentId);
@@ -323,7 +336,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
     safeEmit('chat-start', {});
     safeEmit('log', { agentId: 'ceo', message: 'Команда коротко обсуждает результаты (CROSS_TALK).' });
     for (const own of results) {
-      if (signal.aborted) return;
+      if (signal.aborted) return said;
       const agent = AGENTS.find(a => a.id === own.agentId);
       const incoming = said.findLast(message => message.to === own.agentId);
       const partner = results.find(r => r.agentId === chatPartner(own.agentId, participants, incoming?.agentId));
@@ -333,7 +346,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         const { text, stats } = await callModel(chatMessages(agent, own.result, partner, incoming?.agentId === partner.agentId ? incoming : undefined), {
           maxTokens: config.crossTalkMaxTokens, signal, label: `${runId}/chat-${agent.id}`
         });
-        if (signal.aborted) return;
+        if (signal.aborted) return said;
         reply = cleanChatReply(text, agent.id, participants, {
           truncated: stats?.doneReason === 'length',
           // Пересказ результата коллеги или уже сказанной реплики — ничего нового.
@@ -342,13 +355,124 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         if (!reply) diag(`[run ${runId}] реплика ${agent.id} пропущена: пустая, заглушка или пересказ`, { text: String(text || '').slice(0, 80) });
         else said.push({ agentId: agent.id, ...reply });
       } catch (error) {
-        if (signal.aborted) return;
+        if (signal.aborted) return said;
         // Реплика — необязательная часть: сбой не портит готовый итог.
         diag(`[run ${runId}] реплика ${agent.id} не получена`, { error: error?.message });
       }
       // Сначала статус, потом реплика: на сцене реплика становится подписью сотрудника, и статус её не затирает.
       safeEmit('agent-status', { agentId: agent.id, status: 'done', task: 'Подзадача готова' });
       if (reply) safeEmit('agent-chat', { agentId: agent.id, ...reply });
+    }
+    return said;
+  }
+
+  /**
+   * Одно исправление по замечанию (REVISION). Готовый отчёт уже показан, стадия его не задерживает.
+   * Не больше трёх вызовов модели: выбор замечания, ответ автора и новая сводка (только если сводку писала модель).
+   * Сервер проверяет замечание (validateRemark) и исправление (validateRevision); решает, исправлять ли, автор ответа.
+   * Новый ответ сотрудника и новый отчёт уходят одним событием revision. Нет замечания, автор отклонил его,
+   * исправление не прошло проверку, сбой, тайм-аут или отмена — ответы и отчёт остаются прежними.
+   */
+  async function reviseOnce({ goal, plan, outcomes, results, failed, summaryKind, chat, safeEmit, signal, runId }) {
+    const limit = config.revisionTimeoutMs >= 1000 ? `${Math.round(config.revisionTimeoutMs / 1000)} с` : `${config.revisionTimeoutMs} мс`;
+    const timer = AbortSignal.timeout(config.revisionTimeoutMs);
+    const stage = AbortSignal.any([signal, timer]);
+    // Версия ответа: 1 — первый результат. Замечание относится к той версии, которую процитировало.
+    const versions = Object.fromEntries(results.map(r => [r.agentId, 1]));
+    const keep = (outcome, reason, extra = {}) => safeEmit('revision-kept', { outcome, reason, ...extra });
+    let author = null;
+    safeEmit('revision-start', {});
+    safeEmit('log', { agentId: 'ceo', message: `Проверка одного замечания (REVISION): не больше 3 вызовов модели и ${limit}. Готовый отчёт уже показан и до проверенного исправления не меняется.` });
+    safeEmit('agent-status', { agentId: 'ceo', status: 'thinking', task: 'Ищет проверяемое замечание' });
+    try {
+      const pick = await callModel(revisionPickMessages(goal, results, chat), {
+        json: true, maxTokens: config.revisionPickMaxTokens, signal: stage, label: `${runId}/revision-pick`
+      });
+      let parsed = null;
+      try { parsed = extractJson(pick.text); } catch { /* не JSON — замечание не принимается */ }
+      const checked = validateRemark(parsed, { goal, results, versions });
+      if (checked.none) {
+        keep('none', 'проверяющий не нашёл ошибки, которую можно подтвердить цитатой из задания или данных коллеги');
+        safeEmit('log', { agentId: 'ceo', message: 'Замечаний, подтверждённых заданием или данными коллеги, нет — ответы и отчёт без изменений.' });
+        return;
+      }
+      if (!checked.remark) {
+        keep('invalid', checked.reason);
+        safeEmit('log', { agentId: 'ceo', message: `Замечание не принято сервером: ${checked.reason}. Ответы и отчёт без изменений.`, kind: 'warning' });
+        return;
+      }
+      const { remark } = checked;
+      const task = plan.tasks.find(t => t.agentId === remark.to);
+      const agent = AGENTS.find(a => a.id === remark.to);
+      const current = results.find(r => r.agentId === remark.to).result;
+      const basis = remark.basis.source === 'goal' ? 'задание' : `ответ ${shortName(remark.basis.source)}`;
+      safeEmit('revision-remark', { remark });
+      safeEmit('log', { agentId: remark.from, message: `Замечание для ${agent.name}: ${remark.defect} В ответе: «${remark.quote}». Основание (${basis}): «${remark.basis.quote}».` });
+      author = agent.id;
+      safeEmit('agent-status', { agentId: agent.id, status: 'thinking', task: `Проверяет замечание ${shortName(remark.from)}` });
+      const answer = await callModel(revisionMessages(agent, task, plan, current, remark), {
+        maxTokens: task.maxTokens, signal: stage, label: `${runId}/revision-${agent.id}`
+      });
+      const reply = parseAuthorReply(answer.text);
+      if (!reply.verdict) {
+        keep('unclear', 'автор не ответил ясно, исправлять ли');
+        safeEmit('log', { agentId: agent.id, message: `${agent.name} не ответил ясно, исправлять ли, — ответ не изменён.`, kind: 'warning' });
+        return;
+      }
+      if (reply.verdict === 'reject') {
+        keep('rejected', reply.reason || 'без объяснения', { reply: reply.reason });
+        safeEmit('log', { agentId: agent.id, message: `${agent.name} отклонил замечание${reply.reason ? `: ${reply.reason}` : ' без объяснения'}. Ответ не изменён.` });
+        return;
+      }
+      const problem = validateRevision(task, current, reply, remark, { truncated: answer.stats?.doneReason === 'length' });
+      if (problem) {
+        keep('unchecked', problem, { reply: reply.reason });
+        safeEmit('log', { agentId: 'ceo', message: `Исправление ${agent.name} не применено: ${problem}. Ответ и отчёт без изменений.`, kind: 'warning' });
+        return;
+      }
+      // Новый отчёт собирается так же, как первый: из ответов сотрудников или сводкой модели.
+      const nextOutcomes = outcomes.map(o => (o.agentId === agent.id ? { ...o, result: reply.result, revisedBy: remark.from } : o));
+      const nextResults = results.map(r => (r.agentId === agent.id ? { ...r, result: reply.result } : r));
+      let summary = summaryKind === 'single' ? reply.result : combinedResults(nextResults);
+      if (summaryKind === 'model') {
+        safeEmit('agent-status', { agentId: 'ceo', status: 'thinking', task: 'Обновляет итоговый отчёт' });
+        ({ text: summary } = await callModel(summaryMessages(goal, nextResults, failed), {
+          maxTokens: config.summaryMaxTokens, signal: stage, label: `${runId}/revision-summary`
+        }));
+      }
+      // Тайм-аут или остановка до применения — прежняя версия; замечание к устаревшей версии не применяется.
+      stage.throwIfAborted();
+      if (versions[agent.id] !== remark.version) {
+        keep('stale', 'замечание относится к устаревшей версии ответа');
+        return;
+      }
+      const received = outcomes.find(o => o.agentId === agent.id)?.handoffFrom || [];
+      const saved = safeEmit('revision', {
+        agentId: agent.id, subtaskId: task.id, fromVersion: remark.version, version: remark.version + 1,
+        result: reply.result, final: `${attributionBlock(plan, nextOutcomes)}\n\n${summary}`,
+        remark, reply: reply.reason, foreign: foreignAttributions(agent.id, reply.result, received), stats: answer.stats
+      });
+      versions[agent.id] = remark.version + 1;
+      safeEmit('log', {
+        agentId: agent.id,
+        message: `${agent.name} исправил ответ по замечанию ${shortName(remark.from)}${reply.reason ? `: ${reply.reason}` : ''}. Ответ и итоговый отчёт обновлены вместе.${saved === true ? ' Новая версия записана на диск.' : ''}`,
+        kind: 'success'
+      });
+      if (saved === false) {
+        safeEmit('log', { agentId: 'ceo', message: 'Исправление показано, но запись на диск не удалась: после перезапуска сервера может открыться прежняя версия отчёта.', kind: 'warning' });
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      const reason = timer.aborted ? `не уложилась в ${limit} (REVISION_TIMEOUT_MS)` : `не удалась: ${error?.message || 'неизвестная ошибка'}`;
+      diag(`[run ${runId}] revision: проверка замечания ${reason}`);
+      keep('failed', `проверка замечания ${reason}`);
+      safeEmit('log', { agentId: 'ceo', message: `Проверка замечания ${reason}. Итоговый отчёт остаётся прежним.`, kind: 'warning' });
+    } finally {
+      // Кто проверял замечание, больше не «думает». При остановке пользователем это делает RunStore.
+      if (!signal.aborted) {
+        if (author) safeEmit('agent-status', { agentId: author, status: 'done', task: 'Подзадача готова' });
+        safeEmit('agent-status', { agentId: 'ceo', status: 'done', task: 'Итоговый отчёт готов' });
+      }
     }
   }
 
@@ -431,7 +555,7 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
         concurrency: config.concurrency, activeCalls: limiter.active, queuedCalls: limiter.waiting,
         timeoutMs: config.timeoutMs, router: config.routerMode, ceoSummary: config.ceoSummary,
         agentMaxTokens: config.agentMaxTokens, agentShortMaxTokens: config.agentShortMaxTokens,
-        handoff: config.handoff, crossTalk: config.crossTalk
+        handoff: config.handoff, crossTalk: config.crossTalk, revision: config.revision
       });
     }
     // Проверка модели вызывает модель (занимает очередь, у платного API стоит денег), поэтому только POST:
