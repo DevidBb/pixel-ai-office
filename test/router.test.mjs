@@ -394,6 +394,12 @@ test('очистка хвоста, «никого … кроме», «не» и 
   }
 });
 
+test('повторное упоминание сотрудника не дописывает поручение повторно', () => {
+  assert.deepEqual(parseAssignments('Luma 4 — другое; Luma 4 и Luma 4 и Luma 4 — слоган').assignments, { creator: 'другое; слоган' });
+  const big = 'Luma 4 — другое; ' + 'Luma 4 и '.repeat(260) + ' — ' + 'о'.repeat(2400);
+  assert.ok(parseAssignments(normalizeGoal(big)).assignments.creator.length < 3000, 'раньше — 625 тыс. символов в запрос модели');
+});
+
 test('«ни одного … кроме» через перенос строки: только названный сотрудник', () => {
   const route = routeByExplicit(normalizeGoal('Не назначай ни\nодного сотрудника, кроме Luma 4. Нужен слоган для кофейни.'));
   assert.deepEqual(route.agentIds, ['creator']);

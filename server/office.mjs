@@ -204,7 +204,8 @@ export function parseAssignments(goal) {
       continue;
     }
     if (!ids.length) continue;
-    pending.push(...ids);
+    // Без повторов: «Luma 4 и Luma 4 и … — x» дописывал x к поручению столько раз, сколько упоминаний
+    pending.push(...ids.filter(id => !pending.includes(id)));
     if (!clause || /^(?:и|или|а также|,)$/iu.test(clause)) {
       // Общее поручение передаётся только внутри фрагмента («Luma 2 и Luma 4 — слоган»),
       // но не через «;» или конец предложения («Luma 2; Luma 4 — слоган»).
