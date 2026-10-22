@@ -384,6 +384,22 @@ test('длинные серии разделителей и пробелов р�
   assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
 });
 
+// Квадратичный разбор на 5000 символах — 0.2–0.4 с, от порога с запуском процесса его не отличить. В десять раз
+// длиннее (самих функций лимит не касается) квадратичное выражение работает 10–40 с, линейное — десятки мс.
+test('очистка хвоста, «никого … кроме», «не» и арифметика линейны: в 10 раз длиннее лимита — быстро', () => {
+  const N = 50000;
+  for (const goal of ['Luma 4 — x' + ','.repeat(N) + 'о', 'никого '.repeat(N / 7) + ': Luma 4 — слоган',
+    'не '.repeat(N / 3) + ': Luma 4 — слоган', 'Всем специалистам: ' + '1'.repeat(N) + 'о']) {
+    assert.ok(parsesQuickly(goal, 3000), `${JSON.stringify(goal.slice(0, 30))}… (${goal.length} символов)`);
+  }
+});
+
+test('«ни одного … кроме» через перенос строки: только названный сотрудник', () => {
+  const route = routeByExplicit(normalizeGoal('Не назначай ни\nодного сотрудника, кроме Luma 4. Нужен слоган для кофейни.'));
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.deepEqual(route.excluded.sort(), ['finance', 'product', 'research', 'sales']);
+});
+
 test('normalizeGoal: серии пробелов — один пробел, переносы — не больше двух подряд, смысл задачи тот же', () => {
   assert.equal(normalizeGoal('  Luma 4\t\t—   слоган\r\n\r\n\r\n\r\nLuma 2 — рынок  '), 'Luma 4 — слоган\n\nLuma 2 — рынок');
   assert.equal(normalizeGoal('1. Рынок\n2. Слоган'), '1. Рынок\n2. Слоган');

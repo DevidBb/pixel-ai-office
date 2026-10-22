@@ -82,13 +82,17 @@ const NEGATION_AFTER = new RegExp(
 // через запятую — только если у следующего сотрудника нет своего поручения («Luma 3, Luma 4 — слоган»).
 // «Никого, кроме Luma 4, не подключай», «Не назначай никого, кроме Luma 4» — разрешён ТОЛЬКО названный.
 // Без отрицательного местоимения («Всем, кроме Luma 4») «кроме» по-прежнему исключает.
-// Сначала «кроме …» в конце (после него «\s+» может перейти строку), затем «никого» в том же фрагменте перед ним.
+// Сначала «кроме …» в конце, затем последнее «никого» перед ним: между ними не должно быть [.;!?\n]. Само слово
+// может переходить строку («ни\nодного»), поэтому по последнему разделителю проверяется конец слова, а не начало.
 // Одно выражение «никого[^.;!?\n]*кроме…$» дочитывало строку от каждого «никого» — квадратично.
-const ONLY_WORD = /(?<!\p{L})(?:никого|никому|никем|никаких|никто|ни\s+одного|ни\s+одному)(?!\p{L})/iu;
+const ONLY_WORDS = /(?<!\p{L})(?:никого|никому|никем|никаких|никто|ни\s+одного|ни\s+одному)(?!\p{L})/giu;
 const ONLY_EXCEPT = new RegExp(String.raw`(?<!\p{L})(?:кроме|за\s+исключением|помимо)\s+${EXCLUDE_FILLER}$`, 'iu');
 function onlyBefore(prefix) {
   const except = prefix.match(ONLY_EXCEPT);
-  return Boolean(except) && ONLY_WORD.test(afterLast(prefix.slice(0, except.index), '.;!?\n'));
+  if (!except) return false;
+  const before = prefix.slice(0, except.index);
+  const word = [...before.matchAll(ONLY_WORDS)].at(-1);
+  return Boolean(word) && word.index + word[0].length > before.length - afterLast(before, '.;!?\n').length;
 }
 
 /** Часть text после последнего из знаков stops (линейно, в отличие от «[^…]*$»). */
