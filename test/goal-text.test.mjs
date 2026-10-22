@@ -20,6 +20,19 @@ test('buildPlan: разбор по нормализованной копии, с
   }
 });
 
+test('buildPlan: адресное поручение сотруднику — как написал пользователь, разбор — по копии', () => {
+  const raw = 'Luma 4 — сравни «a  b» и «a\tb»;   Luma 2 —  рынок  кофе;\nLuma 4 — ещё  один слоган';
+  const parsed = normalizeGoal(raw);
+  const route = routeByExplicit(parsed);
+  const plan = buildPlan(parsed, route, { text: raw });
+  const task = id => plan.tasks.find(t => t.agentId === id);
+  assert.equal(task('creator').objective, 'сравни «a  b» и «a\tb»; ещё  один слоган');
+  assert.equal(task('research').objective, 'рынок  кофе');
+  assert.equal(task('creator').exactlyOne, true, 'разбор по копии: «один слоган»');
+  // Без исходного текста — разобранное поручение, как раньше
+  assert.equal(buildPlan(parsed, route).tasks.find(t => t.agentId === 'creator').objective, route.assignments.creator);
+});
+
 test('сервер: в истории и в подсказке сотрудника — исходный текст задачи', async () => {
   const config = readConfig({ OPENAI_BASE_URL: 'http://127.0.0.1:11434/v1', OPENAI_MODEL: 'mock' });
   const limiter = new Limiter(1);
