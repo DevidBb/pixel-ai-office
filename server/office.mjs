@@ -58,7 +58,8 @@ const ADJACENT_EXCLUDE = String.raw`(?:кроме|исключая|за\s+иск
 const EXCLUDE_VERB = String.raw`(?:исключи(?:те)?|убери(?:те)?|отключи(?:те)?` +
   String.raw`|не\s+(?:подключай|привлекай|задействуй|используй|назначай|включай|добавляй|приглашай|зови|бери|трогай|ставь)(?:те)?` +
   String.raw`|не\s+(?:надо|нужно|стоит|будем|хочу)\s+(?:подключать|привлекать|задействовать|использовать|назначать|включать|добавлять|приглашать|звать|брать|трогать))`;
-const POLITE = String.raw`\s*,?\s*(?:пожалуйста|плиз)\s*,?`;
+// Без двух «\s*» вокруг необязательной запятой: движок перебирал, как поделить между ними пробелы.
+const POLITE = String.raw`\s*(?:,\s*)?(?:пожалуйста|плиз)\s*,?`;
 // До четырёх слов без знаков препинания (запятая — только вокруг «пожалуйста»): «Не используй клише, Luma 4 — …» не исключение.
 const EXCLUDE_GAP = String.raw`(?:${POLITE}|\s+[\p{L}\d-]+){0,4}`;
 const NEGATION_BEFORE = new RegExp(
@@ -66,7 +67,9 @@ const NEGATION_BEFORE = new RegExp(
   'iu'
 );
 // «Не»/«без» в том же фрагменте, но не распознанное как запрет — сотрудник остаётся, а CEO предупреждает.
-const UNCERTAIN_NEGATION = /(?<!\p{L})(?:не|без)(?!\p{L})[^,;.:!?\n]*$/iu;
+// Ищется в хвосте после последнего знака (afterLast): «…[^,;.:!?\n]*$» дочитывало строку от каждого «не».
+const UNCERTAIN_NEGATION = /(?<!\p{L})(?:не|без)(?!\p{L})/iu;
+const UNCERTAIN_STOPS = ',;.:!?\n';
 // После имени: «Luma 2 не нужен», «Luma 5 не участвует», «Luma 4 не нужно», «Luma 3 не надо подключать»,
 // «Luma 6 пусть отдыхает», «Luma 2 исключить». Но «Luma 4 не нужно исключать» — не исключение.
 const NEGATION_AFTER = new RegExp(
@@ -79,10 +82,25 @@ const NEGATION_AFTER = new RegExp(
 // через запятую — только если у следующего сотрудника нет своего поручения («Luma 3, Luma 4 — слоган»).
 // «Никого, кроме Luma 4, не подключай», «Не назначай никого, кроме Luma 4» — разрешён ТОЛЬКО названный.
 // Без отрицательного местоимения («Всем, кроме Luma 4») «кроме» по-прежнему исключает.
-const ONLY_BEFORE = new RegExp(
-  String.raw`(?<!\p{L})(?:никого|никому|никем|никаких|никто|ни\s+одного|ни\s+одному)(?!\p{L})[^.;!?\n]*(?<!\p{L})(?:кроме|за\s+исключением|помимо)\s+${EXCLUDE_FILLER}$`,
-  'iu'
-);
+// Сначала «кроме …» в конце, затем последнее «никого» перед ним: между ними не должно быть [.;!?\n]. Само слово
+// может переходить строку («ни\nодного»), поэтому по последнему разделителю проверяется конец слова, а не начало.
+// Одно выражение «никого[^.;!?\n]*кроме…$» дочитывало строку от каждого «никого» — квадратично.
+const ONLY_WORDS = /(?<!\p{L})(?:никого|никому|никем|никаких|никто|ни\s+одного|ни\s+одному)(?!\p{L})/giu;
+const ONLY_EXCEPT = new RegExp(String.raw`(?<!\p{L})(?:кроме|за\s+исключением|помимо)\s+${EXCLUDE_FILLER}$`, 'iu');
+function onlyBefore(prefix) {
+  const except = prefix.match(ONLY_EXCEPT);
+  if (!except) return false;
+  const before = prefix.slice(0, except.index);
+  const word = [...before.matchAll(ONLY_WORDS)].at(-1);
+  return Boolean(word) && word.index + word[0].length > before.length - afterLast(before, '.;!?\n').length;
+}
+
+/** Часть text после последнего из знаков stops (линейно, в отличие от «[^…]*$»). */
+function afterLast(text, stops) {
+  let i = text.length;
+  while (i > 0 && !stops.includes(text[i - 1])) i--;
+  return text.slice(i);
+}
 // Хвост той же конструкции («…, не подключай») — часть запрета для остальных, а не поручение.
 const ONLY_VERB_CLAUSE = /^(?:не\s+)?(?:подключай|назначай|привлекай|задействуй|зови|бери|трогай|ставь)\p{L}*$/iu;
 const LIST_AND = /^\s*,?\s*(?:и|или)\s*$/iu;
@@ -129,7 +147,17 @@ function findMentions(goal) {
 }
 
 function cleanClause(text) {
-  return text.replace(/^[\s,:—–\-]+/u, '').replace(/[\s,;.]+$/u, '').trim();
+  // Хвост — только с начала серии знаков: иначе каждая позиция длинной серии заново дочитывала её до конца.
+  return text.replace(/^[\s,:—–\-]+/u, '').replace(/(?<![\s,;.])[\s,;.]+$/u, '').trim();
+}
+
+/**
+ * Задача для разбора: серии пробелов и табуляций — один пробел, три и больше переносов — два.
+ * Смысл не меняется, а выражения разбора не перебирают, как поделить длинную серию пробелов между соседними «\s*»:
+ * «не подключай» и четыре «пожалуйста» через 8 пробелов (109 символов) разбирались 8 с и останавливали сервер.
+ */
+export function normalizeGoal(goal) {
+  return String(goal).replace(/\r\n?/g, '\n').replace(/[^\S\n]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
@@ -137,10 +165,13 @@ function cleanClause(text) {
  * Возвращает задания по сотрудникам, исключённых сотрудников и общий контекст без чужих поручений.
  * «Luma 2 и Luma 4 — слоган» и «Luma 2–6 — слоган» дают одно задание всем названным.
  * «Не подключай Luma 2», «кроме Luma 6» исключают сотрудника, даже если просили всю команду.
+ * goal — после normalizeGoal (как и у маршрутизации): на длинных сериях пробелов выражения запрета медленные.
+ * assignmentSpans — где в goal каждое поручение (для buildPlan с исходным текстом).
  */
 export function parseAssignments(goal) {
   const mentions = findMentions(goal);
   const assignments = new Map();
+  const assignmentSpans = new Map(); // где в goal каждое поручение — чтобы отдать сотруднику исходный текст
   const excluded = new Set();
   const spans = [];
   const only = new Set();
@@ -159,10 +190,10 @@ export function parseAssignments(goal) {
     let clause = cleanClause(raw);
     const ownClause = clause && !/^(?:и|или|а также)$/iu.test(clause);
     const inList = LIST_AND.test(prefix) || (LIST_COMMA.test(prefix) && !ownClause);
-    const isOnly = ONLY_BEFORE.test(prefix) || (previous === 'only' && inList);
+    const isOnly = onlyBefore(prefix) || (previous === 'only' && inList);
     const negated = !isOnly && (NEGATION_BEFORE.test(prefix) || NEGATION_AFTER.test(tail) || (previous === 'negated' && inList));
     previous = isOnly ? 'only' : negated ? 'negated' : null;
-    if (!isOnly && !negated && UNCERTAIN_NEGATION.test(prefix)) ids.forEach(id => uncertain.add(id));
+    if (!isOnly && !negated && UNCERTAIN_NEGATION.test(afterLast(prefix, UNCERTAIN_STOPS))) ids.forEach(id => uncertain.add(id));
     if (isOnly) {
       ids.forEach(id => only.add(id));
       if (ONLY_VERB_CLAUSE.test(clause)) clause = '';
@@ -173,7 +204,8 @@ export function parseAssignments(goal) {
       continue;
     }
     if (!ids.length) continue;
-    pending.push(...ids);
+    // Без повторов: «Luma 4 и Luma 4 и … — x» дописывал x к поручению столько раз, сколько упоминаний
+    pending.push(...ids.filter(id => !pending.includes(id)));
     if (!clause || /^(?:и|или|а также|,)$/iu.test(clause)) {
       // Общее поручение передаётся только внутри фрагмента («Luma 2 и Luma 4 — слоган»),
       // но не через «;» или конец предложения («Luma 2; Luma 4 — слоган»).
@@ -183,9 +215,13 @@ export function parseAssignments(goal) {
       }
       continue;
     }
+    const from = mention.end + raw.indexOf(clause); // clause — подстрока raw: cleanClause снимает только края
+    const span = [from, from + clause.length];
     for (const agentId of pending) {
       const previous = assignments.get(agentId);
       assignments.set(agentId, previous && previous !== clause ? `${previous}; ${clause}` : clause);
+      if (previous && previous !== clause) assignmentSpans.get(agentId)?.push(span);
+      else if (previous !== clause) assignmentSpans.set(agentId, [span]);
     }
     pending = [];
   }
@@ -201,10 +237,14 @@ export function parseAssignments(goal) {
   }
   context += goal.slice(cursor);
   context = context
-    .replace(/\s*[:;,](?:[\s;,]*[;,])*\s*(?=\.|$)/g, '')
-    .replace(/(?:\s*[;,]\s*){2,}/g, '; ').replace(/\s+([.;,])/g, '$1').replace(/\s{2,}/g, ' ').trim();
+    // Хвост из разделителей перед точкой или концом. Без вложенного повтора «(?:[\s;,]*[;,])*»: на «;;;…;о»
+    // он перебирал все разбиения серии (27 знаков — секунды, 40 — часы) и вешал сервер. Совпадение начинается только
+    // с начала серии разделителей (или с двоеточия): иначе каждая позиция серии заново проверяла её хвост.
+    .replace(/(?:(?<![\s;,])\s*[:;,]|\s*:)[\s;,]*(?=\.|$)/g, '')
+    .replace(/\s*[;,](?:\s*[;,])+\s*/g, '; ').replace(/\s+([.;,])/g, '$1').replace(/\s{2,}/g, ' ').trim();
   for (const agentId of excluded) uncertain.delete(agentId);
-  return { assignments: Object.fromEntries(assignments), excluded: [...excluded], uncertain: [...uncertain], context };
+  const spansOf = Object.fromEntries([...assignmentSpans].filter(([agentId]) => assignments.get(agentId)));
+  return { assignments: Object.fromEntries(assignments), assignmentSpans: spansOf, excluded: [...excluded], uncertain: [...uncertain], context };
 }
 
 export function wantsWholeTeam(goal) {
@@ -249,20 +289,20 @@ const withExclusions = (reason, excluded) => excluded.length ? `${reason}; по 
  * Возвращает null, если явных назначений нет.
  */
 export function routeByExplicit(goal, maxAgents = 5) {
-  const { assignments, excluded, context } = parseAssignments(goal);
+  const { assignments, assignmentSpans, excluded, context } = parseAssignments(goal);
   const allowed = AGENTS.map(a => a.id).filter(id => !excluded.includes(id));
   const named = Object.keys(assignments).filter(id => agentById(id));
   if (wantsWholeTeam(goal) && allowed.length) {
     return {
       agentIds: allowed.slice(0, maxAgents),
-      assignments, excluded, context,
+      assignments, assignmentSpans, excluded, context,
       source: 'explicit',
       reason: withExclusions(named.length ? `пользователь явно попросил всю команду и указал задания для ${names(named)}` : 'пользователь явно попросил всю команду', excluded)
     };
   }
   if (named.length) {
     const agentIds = allowed.filter(id => named.includes(id)).slice(0, maxAgents);
-    return { agentIds, assignments, excluded, context, source: 'explicit', reason: withExclusions(`пользователь явно назначил: ${names(agentIds)}`, excluded) };
+    return { agentIds, assignments, assignmentSpans, excluded, context, source: 'explicit', reason: withExclusions(`пользователь явно назначил: ${names(agentIds)}`, excluded) };
   }
   return null;
 }
@@ -311,30 +351,57 @@ export function uncertainNote(goal, agentIds) {
     : '';
 }
 
-export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxTokens = 220 } = {}) {
+/**
+ * Поручения так, как их написал пользователь. Разбор идёт по normalizeGoal(text), а она меняет только пробелы:
+ * непробельные знаки копии и исходника совпадают по порядку, и по ним фрагмент копии находится в исходнике.
+ */
+function assignmentsAsWritten(goal, text, route) {
+  const assignments = { ...(route.assignments || {}) };
+  if (text === goal || !route.assignmentSpans) return assignments;
+  const visible = s => Array.from(s.matchAll(/\S/g), m => m.index);
+  const inGoal = visible(goal), inText = visible(text);
+  if (inGoal.length !== inText.length || inGoal.some((at, k) => goal[at] !== text[inText[k]])) return assignments;
+  const rank = new Map(inGoal.map((at, k) => [at, k]));
+  for (const [agentId, parts] of Object.entries(route.assignmentSpans)) {
+    if (!assignments[agentId]) continue;
+    const written = parts.map(([start, end]) => text.slice(inText[rank.get(start)], inText[rank.get(end - 1)] + 1)).join('; ');
+    // Без пробелов должно получиться то же поручение — иначе остаётся разобранный текст
+    if (written.replace(/\s+/g, '') === assignments[agentId].replace(/\s+/g, '')) assignments[agentId] = written;
+  }
+  return assignments;
+}
+
+/**
+ * План задачи. goal — текст для разбора (normalizeGoal), text — исходный текст пользователя: он уходит сотрудникам
+ * в задании и контексте как есть, с отступами, табуляцией и пустыми строками.
+ */
+export function buildPlan(goal, route, { agentMaxTokens = 700, agentShortMaxTokens = 220, text = goal } = {}) {
   const single = route.agentIds.length === 1;
   const short = isShortRequest(goal);
   const assignments = route.assignments || {};
+  const written = assignmentsAsWritten(goal, text, route);
   const context = route.context || goal;
   return {
     summary: `CEO назначил: ${route.agentIds.map(id => `${agentById(id).name} (${agentById(id).role})`).join(', ')} — ${route.reason}.${uncertainNote(goal, route.agentIds)}`,
     tasks: route.agentIds.map(agentId => {
       const agent = agentById(agentId);
       const assignment = assignments[agentId];
-      const objective = assignment
-        ? assignment
+      const objectiveFor = (whole, own) => own
+        ? own
         : single
-          ? goal
-          : `Выполни часть цели, относящуюся к твоей роли (${agent.role}): ${goal}`;
+          ? whole
+          : `Выполни часть цели, относящуюся к твоей роли (${agent.role}): ${whole}`;
+      const objective = objectiveFor(text, written[agentId]);
+      const parsed = objectiveFor(goal, assignment);
       return {
         id: `task-${agentId}`,
         agentId,
         title: assignment ? `${agent.name}: ${clip(assignment, 70)}` : single ? `${agent.role}: выполнить задачу` : `${agent.role}: своя часть задачи`,
         objective,
-        context: assignment ? context : goal,
+        context: assignment ? context : text,
         assigned: Boolean(assignment),
-        exactlyOne: asksForOne(objective),
-        maxTokens: short || isShortRequest(objective) ? Math.min(agentShortMaxTokens, agentMaxTokens) : agentMaxTokens
+        exactlyOne: asksForOne(parsed),
+        maxTokens: short || isShortRequest(parsed) ? Math.min(agentShortMaxTokens, agentMaxTokens) : agentMaxTokens
       };
     })
   };
@@ -351,7 +418,9 @@ export function contextForAgent(context) {
 
 // Калькулятор офиса: точные значения арифметики из задания. Маленькая модель ошибается в счёте,
 // поэтому сервер считает сам и подсказывает ответ («30 × 3 = 90»).
-const ARITHMETIC = /\d+(?:[.,]\d+)?(?:\s*[×x*·/+\-−]\s*\d+(?:[.,]\d+)?)+/gu;
+// Начало — только с первой цифры числа: самое левое совпадение и так начинается там, а попытки с каждой
+// следующей цифры длинного числа дочитывали его до конца (квадратично).
+const ARITHMETIC = /(?<!\d)\d+(?:[.,]\d+)?(?:\s*[×x*·/+\-−]\s*\d+(?:[.,]\d+)?)+/gu;
 
 function evaluateArithmetic(expression) {
   const tokens = expression.replace(/[×x*·]/g, '*').replace(/−/g, '-').match(/\d+(?:[.,]\d+)?|[*/+-]/g);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routeByRules, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
+import { spawnSync } from 'node:child_process';
+import { routeByRules, routeByExplicit, normalizeGoal, fallbackRoute, parseAssignments, assertSomeoneAllowed, uncertainNote, buildPlan, agentMessages, foreignAttributions, needsModelSummary, AGENTS } from '../server/office.mjs';
 import { COFFEE_GOAL, COFFEE_ASSIGNMENTS, SLOGAN_GOAL } from './fixtures.mjs';
 
 const ALL = ['research', 'product', 'creator', 'sales', 'finance'];
@@ -353,4 +354,61 @@ test('нераспознанное «не» рядом с именем: сотр
   assert.equal(uncertainNote('Не подключай, пожалуйста, Luma 2; Luma 4 — слоган', ['creator']), '');
   assert.equal(uncertainNote('Не стесняйся, Luma 4 — слоган', ['creator']), '');
   assert.equal(uncertainNote(COFFEE_GOAL, Object.keys(COFFEE_ASSIGNMENTS)), '');
+});
+
+// Задача до 5000 символов разбирается синхронно: долгий разбор останавливает весь сервер. Разбор — в отдельном
+// процессе с внешним тайм-аутом: если медленное выражение вернётся, тест упадёт, а не повиснет.
+// Путь сервера: разбор нормализованной копии, план с исходным текстом, подсказки каждому сотруднику.
+function parsesQuickly(goal, ms = 1500) {
+  const office = new URL('../server/office.mjs', import.meta.url).href;
+  const code = `import(${JSON.stringify(office)}).then(o => { const raw = ${JSON.stringify(goal)}; const g = o.normalizeGoal(raw);` +
+    ' const r = o.routeByExplicit(g, 5) || o.routeByRules(g, 5) || o.fallbackRoute(g, 5); const plan = o.buildPlan(g, r, { text: raw });' +
+    ' for (const t of plan.tasks) o.agentMessages(o.AGENTS.find(a => a.id === t.agentId), t, plan); o.wantsWholeTeam(g); })';
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { timeout: ms });
+  return !result.error && result.status === 0;
+}
+
+test('длинные серии разделителей и пробелов разбираются быстро (раньше — секунды и часы)', () => {
+  const S = ' '.repeat(2400);
+  for (const goal of [';'.repeat(40) + 'о', ','.repeat(40) + 'о', ';'.repeat(4999) + 'о',
+    'не подключай' + (' '.repeat(8) + 'пожалуйста').repeat(4) + ' '.repeat(8) + '! Luma 4 — слоган',
+    'x' + S + ';' + S + 'о', 'Luma' + S + S + 'о', 'всем' + S + S + 'о', 'Luma 2' + S + 'о Luma 4 — слоган',
+    'не подключай' + S + '! Luma 4 — слоган', 'Luma 4 — x' + S + 'о', 'никого '.repeat(700) + ': Luma 4 — слоган',
+    'не '.repeat(1600) + ': Luma 4 — слоган', '1'.repeat(4999) + 'о',
+    'не подключай' + (' '.repeat(48) + 'пожалуйста').repeat(4) + ' '.repeat(48) + '! Luma 4 — слоган',
+    'Luma 4 — x' + ','.repeat(4988) + 'о', 'Всем специалистам: ' + '1'.repeat(4979) + 'о']) {
+    assert.ok(parsesQuickly(goal), `${JSON.stringify(goal.slice(0, 30))}… (${goal.length} символов)`);
+  }
+  // Хвост из разделителей по-прежнему убирается, как до исправления.
+  assert.equal(parseAssignments('Сделай план;;; ,,').context, 'Сделай план');
+  assert.equal(parseAssignments('Сделай план: ;, .').context, 'Сделай план.');
+});
+
+// Квадратичный разбор на 5000 символах — 0.2–0.4 с, от порога с запуском процесса его не отличить. В десять раз
+// длиннее (самих функций лимит не касается) квадратичное выражение работает 10–40 с, линейное — десятки мс.
+test('очистка хвоста, «никого … кроме», «не» и арифметика линейны: в 10 раз длиннее лимита — быстро', () => {
+  const N = 50000;
+  for (const goal of ['Luma 4 — x' + ','.repeat(N) + 'о', 'никого '.repeat(N / 7) + ': Luma 4 — слоган',
+    'не '.repeat(N / 3) + ': Luma 4 — слоган', 'Всем специалистам: ' + '1'.repeat(N) + 'о']) {
+    assert.ok(parsesQuickly(goal, 3000), `${JSON.stringify(goal.slice(0, 30))}… (${goal.length} символов)`);
+  }
+});
+
+test('повторное упоминание сотрудника не дописывает поручение повторно', () => {
+  assert.deepEqual(parseAssignments('Luma 4 — другое; Luma 4 и Luma 4 и Luma 4 — слоган').assignments, { creator: 'другое; слоган' });
+  const big = 'Luma 4 — другое; ' + 'Luma 4 и '.repeat(260) + ' — ' + 'о'.repeat(2400);
+  assert.ok(parseAssignments(normalizeGoal(big)).assignments.creator.length < 3000, 'раньше — 625 тыс. символов в запрос модели');
+});
+
+test('«ни одного … кроме» через перенос строки: только названный сотрудник', () => {
+  const route = routeByExplicit(normalizeGoal('Не назначай ни\nодного сотрудника, кроме Luma 4. Нужен слоган для кофейни.'));
+  assert.deepEqual(route.agentIds, ['creator']);
+  assert.deepEqual(route.excluded.sort(), ['finance', 'product', 'research', 'sales']);
+});
+
+test('normalizeGoal: серии пробелов — один пробел, переносы — не больше двух подряд, смысл задачи тот же', () => {
+  assert.equal(normalizeGoal('  Luma 4\t\t—   слоган\r\n\r\n\r\n\r\nLuma 2 — рынок  '), 'Luma 4 — слоган\n\nLuma 2 — рынок');
+  assert.equal(normalizeGoal('1. Рынок\n2. Слоган'), '1. Рынок\n2. Слоган');
+  const goal = 'Luma 2 —   3 группы клиентов;   Luma 4 —\tслоган';
+  assert.deepEqual(routeByExplicit(normalizeGoal(goal))?.agentIds, routeByExplicit(goal)?.agentIds);
 });

@@ -4,7 +4,7 @@ import { RunStore } from './runs.mjs';
 import {
   AGENTS, routeByExplicit, routeByRules, fallbackRoute, routerMessages, buildPlan, agentMessages,
   foreignAttributions, attributionBlock, combinedResults, summaryMessages, agentLabel, needsModelSummary, excludedAgents,
-  assertSomeoneAllowed, uncertainNote
+  assertSomeoneAllowed, uncertainNote, normalizeGoal
 } from './office.mjs';
 
 const DELTA_INTERVAL_MS = 300;
@@ -150,10 +150,12 @@ export function createApp({ config, callModel, limiter, runs = new RunStore() })
     try {
       safeEmit('log', { agentId: 'ceo', message: 'CEO принял цель и выбирает исполнителей.' });
       safeEmit('agent-status', { agentId: 'ceo', status: 'thinking', task: 'Распределяет задачу' });
-      const route = await routeGoal(goal, signal);
+      // Разбор и маршрутизация — по нормализованной копии, сотрудникам и в историю — исходный текст.
+      const parsed = normalizeGoal(goal);
+      const route = await routeGoal(parsed, signal);
       if (cancelled()) return;
-      const plan = buildPlan(goal, route, config);
-      const doubtful = uncertainNote(goal, route.agentIds);
+      const plan = buildPlan(parsed, route, { ...config, text: goal });
+      const doubtful = uncertainNote(parsed, route.agentIds);
       if (doubtful) safeEmit('log', { agentId: 'ceo', message: doubtful.trim(), kind: 'warning' });
       diag(`[run ${runId}] маршрут`, { method: route.method, source: route.source, agents: route.agentIds, ms: Date.now() - runStarted });
       safeEmit('plan', {
